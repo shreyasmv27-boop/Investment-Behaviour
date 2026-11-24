@@ -20,6 +20,7 @@ st.set_page_config(page_title="Invest", page_icon="₹", layout="wide", initial_
 # ---------------------------------------------------------------- settings
 TOTAL = 100_000              # investable amount per respondent
 STEP = 500                   # amount input step
+SIP_MONTHS = 12            # an SIP commits monthly amount x SIP_MONTHS out of the Rs 1,00,000
 SHUFFLE_ORDER = True         # random fund order per respondent; the order is logged to test position effects
 DATA_FILE = Path(__file__).parent / "funds.xlsx"
 LOCAL_DIR = Path(__file__).parent / "responses"
@@ -120,8 +121,26 @@ aria-label="Risk level {esc(level)}"><defs><linearGradient id="rg" x1="0" x2="1"
 def base_css(t):
     st.markdown(f"""
 <style>
-#MainMenu, footer, [data-testid="stToolbar"] {{visibility: hidden;}}
-.block-container {{padding-top: 1.2rem; max-width: 1120px;}}
+#MainMenu, footer, header[data-testid="stHeader"], [data-testid="stToolbar"] {{display: none !important;}}
+.block-container {{padding-top: 2rem !important; max-width: 1180px;}}
+.stButton button[kind="tertiary"] {{padding: 0; min-height: 0; justify-content: flex-start; text-align: left;
+  color: {t['ink']}; border: none;}}
+.stButton button[kind="tertiary"] p {{font-size: 17px; font-weight: 500;}}
+.stButton button[kind="tertiary"]:hover {{color: {t['accent']}; text-decoration: underline;}}
+.st-key-mode_buy button, .st-key-mode_sip button {{border-radius: 999px; height: 46px;}}
+.st-key-mode_buy button p, .st-key-mode_sip button p {{font-size: 17px; font-weight: 600;}}
+.st-key-nav_explore button, .st-key-nav_portfolio button {{flex-direction: column; height: 84px; border: none;
+  background: transparent; border-radius: 14px;}}
+.st-key-nav_explore button p, .st-key-nav_portfolio button p {{font-size: 14px; white-space: normal;
+  overflow: visible; text-overflow: clip; line-height: 1.2;}}
+.st-key-nav_explore button div, .st-key-nav_portfolio button div {{flex-direction: column; gap: 6px;}}
+.st-key-nav_explore button:hover, .st-key-nav_portfolio button:hover {{background: {t['soft']};}}
+.st-key-nav_explore [data-testid="stIconMaterial"], .st-key-nav_portfolio [data-testid="stIconMaterial"] {{
+  font-size: 30px; color: {t['accent']};}}
+.st-key-nav_{st.session_state.get('tab', 'explore')} button {{background: {t['soft']};}}
+.hrow {{font-size: 13px; color: #8a8a8a;}}
+.cell {{font-size: 15px; color: #222; text-align: right;}}
+.cell small {{display: block; font-size: 12px; color: #8a8a8a;}}
 .stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button {{
   background: {t['accent']}; border-color: {t['accent']}; color: #fff; border-radius: 10px;}}
 .stButton > button[kind="primary"]:hover {{filter: brightness(.95); color: #fff;}}
@@ -199,6 +218,8 @@ def init_state():
         ss.alloc = {}
         ss.events = []
         ss.view = None
+        ss.tab = "explore"
+        ss.mode = None
         ss.started_at = now()
 
 
@@ -207,9 +228,30 @@ def log(event, fund="", value=""):
         {"rid": st.session_state.rid, "ts": now(), "event": event, "fund": fund, "value": str(value)})
 
 
+def committed(h):
+    return 0 if not h else h["amount"] * (SIP_MONTHS if h["mode"] == "sip" else 1)
+
+
+def total_committed(exclude=None):
+    return sum(committed(h) for k, h in st.session_state.alloc.items() if k != exclude)
+
+
 def open_fund(fid, name, position):
-    st.session_state.view = fid
-    log("open_fund", name, position)
+    ss = st.session_state
+    ss.view = fid
+    ss.mode = None
+    log("open_fund", name, f"{ss.tab}:{position}")
+
+
+def set_tab(tab):
+    st.session_state.tab = tab
+    st.session_state.view = None
+    log("tab", value=tab)
+
+
+def set_mode(mode, name):
+    st.session_state.mode = mode
+    log("choose_mode", name, mode)
 
 
 def close_fund(name):
@@ -239,17 +281,17 @@ def page_start():
             st.rerun()
 
 
-def topbar(t):
+def topbar():
     ss = st.session_state
     st.markdown(f'<div class="topbar"><div class="dot">₹</div><b>Mutual funds</b>'
                 f'<span>Research simulation in a {esc(ss.app)}-style layout · not affiliated with any app or fund house · no real money</span></div>',
                 unsafe_allow_html=True)
 
 
-def wallet(t):
+def wallet():
     ss = st.session_state
-    invested = sum(ss.alloc.values())
-    n = sum(1 for v in ss.alloc.values() if v > 0)
+    invested = total_committed()
+    n = sum(1 for h in ss.alloc.values() if h)
     st.markdown(f"""<div class="wallet"><div class="l">Hi {esc(ss.name)}, your investable amount</div>
 <div class="big">₹{inr(TOTAL)}</div><div class="row">
 <div><span>Invested</span><b>₹{inr(invested)}</b></div>
@@ -257,13 +299,26 @@ def wallet(t):
 <div><span>Funds chosen</span><b>{n}</b></div></div></div>""", unsafe_allow_html=True)
 
 
-def page_list(df, t):
-    ss = st.session_state
-    topbar(t)
-    wallet(t)
-    st.write("Treat this as your own money. Open any fund to see its details and invest. "
-             "Anything you don't invest stays as cash.")
+def sidenav():
+    st.button("Mutual funds", key="nav_explore", icon=":material/work:", use_container_width=True,
+              on_click=set_tab, args=("explore",))
+    n = sum(1 for h in st.session_state.alloc.values() if h)
+    st.button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
+              use_container_width=True, on_click=set_tab, args=("portfolio",))
 
+
+def holding_text(h):
+    if not h:
+        return ""
+    if h["mode"] == "sip":
+        return f"SIP ₹{inr(h['amount'])}/month"
+    return f"Bought ₹{inr(h['amount'])}"
+
+
+def page_explore(df):
+    ss = st.session_state
+    st.write("Treat this as your own money. Click any fund to see its details and invest. "
+             "Anything you don't invest stays as cash.")
     left, right = st.columns([1, 3], gap="large")
     with left:
         cats = ["All"] + sorted(df["category"].dropna().unique().tolist())
@@ -283,7 +338,6 @@ def page_list(df, t):
     with right:
         st.text_input("Search", key="q", placeholder="Search for mutual funds or fund houses",
                       label_visibility="collapsed", on_change=lambda: log("search", value=st.session_state.q))
-
         view = df.set_index("fid").loc[ss.order].reset_index()
         view["position"] = range(1, len(view) + 1)
         if ss.flt != "All":
@@ -309,31 +363,75 @@ def page_list(df, t):
         if view.empty:
             st.info("No funds match. Try another category or search.")
         for _, f in view.iterrows():
-            amt = ss.alloc.get(f["fid"], 0)
+            h = ss.alloc.get(f["fid"])
             with st.container(border=True):
-                c1, c2 = st.columns([5, 1.1], vertical_alignment="center")
-                badge = f' <span class="inv">₹{inr(amt)} invested</span>' if amt else ""
-                aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
-                c1.markdown(f'<div class="fhead">{logo(f["amc"])}<div><div class="fname">{esc(f["fund_name"])}{badge}</div>'
-                            f'<div class="fmeta"><span>AUM <b>{aum}</b></span><span>{esc(f["plan"])}</span>'
-                            f'<span>{esc(f["category"])}</span><span>{esc(f["sub_category"])}</span></div></div></div>',
-                            unsafe_allow_html=True)
-                c2.button("Edit" if amt else "View", key=f"open_{f['fid']}", use_container_width=True,
-                          type="secondary", on_click=open_fund, args=(f["fid"], f["fund_name"], int(f["position"])))
+                c0, c1 = st.columns([0.09, 0.91], vertical_alignment="center")
+                c0.markdown(logo(f["amc"]), unsafe_allow_html=True)
+                with c1:
+                    st.button(f["fund_name"], key=f"open_{f['fid']}", type="tertiary",
+                              on_click=open_fund, args=(f["fid"], f["fund_name"], int(f["position"])))
+                    aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
+                    badge = f'<span class="inv">{holding_text(h)}</span>' if h else ""
+                    st.markdown(f'<div class="fmeta" style="margin-top:-6px"><span>AUM <b>{aum}</b></span>'
+                                f'<span>{esc(f["plan"])}</span><span>{esc(f["category"])}</span>'
+                                f'<span>{esc(f["sub_category"])}</span>{badge}</div>', unsafe_allow_html=True)
 
-        portfolio(df, t)
 
-
-def page_fund(df, t):
+def page_portfolio(df):
     ss = st.session_state
-    f = df.set_index("fid").loc[ss.view]
-    name = f["fund_name"]
-    current = ss.alloc.get(ss.view, 0)
-    others = sum(v for k, v in ss.alloc.items() if k != ss.view)
-    room = TOTAL - others
-    topbar(t)
-    st.button("← Back to all funds", on_click=close_fund, args=(name,))
+    held = [(fid, h) for fid, h in ss.alloc.items() if h]
+    if not held:
+        st.markdown("#### Your portfolio")
+        st.info("You haven't invested in any fund yet. Everything is currently cash.")
+        st.button("Explore mutual funds", type="primary", on_click=set_tab, args=("explore",))
+        return
+    lump = sum(committed(h) for _, h in held if h["mode"] == "buy")
+    sip = sum(committed(h) for _, h in held if h["mode"] == "sip")
+    st.markdown(f"""<div class="stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
+<div><span>Lump sum</span>₹{inr(lump)}</div><div><span>SIPs ({SIP_MONTHS} months)</span>₹{inr(sip)}</div>
+<div><span>Cash</span>₹{inr(TOTAL - lump - sip)}</div><div><span>Funds</span>{len(held)}</div></div>""",
+                unsafe_allow_html=True)
 
+    widths = [0.06, 0.4, 0.16, 0.12, 0.14, 0.12]
+    hdr = st.columns(widths)
+    for c, label in zip(hdr[1:], ["Fund", "Type", "NAV", "Amount", "Allocation"]):
+        c.markdown(f'<div class="hrow" style="text-align:{"left" if label == "Fund" else "right"}">{label}</div>',
+                   unsafe_allow_html=True)
+    fx = df.set_index("fid")
+    for fid, h in sorted(held, key=lambda x: -committed(x[1])):
+        f = fx.loc[fid]
+        st.markdown('<hr style="margin:4px 0 10px;border:none;border-top:1px solid #eee">', unsafe_allow_html=True)
+        c = st.columns(widths, vertical_alignment="center")
+        c[0].markdown(logo(f["amc"], 36), unsafe_allow_html=True)
+        with c[1]:
+            st.button(f["fund_name"], key=f"pf_{fid}", type="tertiary", on_click=open_fund,
+                      args=(fid, f["fund_name"], ss.order.index(fid) + 1))
+            st.markdown(f'<div class="fmeta" style="margin-top:-6px;font-size:13px"><span>{esc(f["plan"])}</span>'
+                        f'<span>{esc(f["category"])}</span><span>{esc(f["sub_category"])}</span></div>',
+                        unsafe_allow_html=True)
+        kind = (f'SIP<small>₹{inr(h["amount"])}/month × {SIP_MONTHS}</small>' if h["mode"] == "sip"
+                else f'Lump sum<small>{h["amount"] / f["nav"]:,.3f} units</small>')
+        c[2].markdown(f'<div class="cell">{kind}</div>', unsafe_allow_html=True)
+        c[3].markdown(f'<div class="cell">₹{inr(f["nav"], 2)}</div>', unsafe_allow_html=True)
+        c[4].markdown(f'<div class="cell">₹{inr(committed(h))}</div>', unsafe_allow_html=True)
+        c[5].markdown(f'<div class="cell">{committed(h) / TOTAL:.0%}</div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    ok = st.checkbox("I'm happy with this portfolio", key="confirm")
+    if st.button("Confirm and submit", type="primary", use_container_width=True, disabled=not ok):
+        submit(df)
+
+
+def page_fund(df):
+    ss = st.session_state
+    fid = ss.view
+    f = df.set_index("fid").loc[fid]
+    name = f["fund_name"]
+    h = ss.alloc.get(fid)
+    room = TOTAL - total_committed(exclude=fid)
+    sip_ok = not pd.isna(f["min_sip"])
+
+    st.button("← Back to " + ("portfolio" if ss.tab == "portfolio" else "all funds"), on_click=close_fund, args=(name,))
     aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
     st.markdown(f'<div class="fhead" style="margin:8px 0 6px">{logo(f["amc"], 60)}<div>'
                 f'<div class="fname" style="font-size:24px">{esc(name)}</div>'
@@ -358,74 +456,73 @@ def page_fund(df, t):
 <div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
 <div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{esc(f['fund_manager'])}</div>
 </div>""", unsafe_allow_html=True)
+
     with b:
         st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
-        with st.container(border=True):
-            st.markdown(f"**Invest in this fund**  \nYou can put up to ₹{inr(room)} here.")
-            with st.form(f"form_{ss.view}", border=False):
-                amt = st.number_input("Amount (₹)", min_value=0, max_value=TOTAL, step=STEP, value=current)
-                go = st.form_submit_button("Update investment" if current else "Invest", use_container_width=True)
-            if go:
-                if amt > room:
-                    st.error(f"That's more than you have left. You can invest up to ₹{inr(room)} here.")
-                elif 0 < amt < f["min_lumpsum"]:
-                    st.error(f"Minimum investment for this fund is ₹{inr(f['min_lumpsum'])}.")
-                else:
-                    ss.alloc[ss.view] = int(amt)
-                    log("set_amount", name, int(amt))
-                    ss.view = None
-                    log("close_fund", name)
-                    st.rerun()
-            if current:
-                if st.button("Remove from portfolio", use_container_width=True):
-                    ss.alloc[ss.view] = 0
-                    log("set_amount", name, 0)
-                    ss.view = None
-                    st.rerun()
-
-
-def portfolio(df, t):
-    ss = st.session_state
-    invested = sum(ss.alloc.values())
-    left = TOTAL - invested
-    st.markdown("#### Your portfolio")
-    chosen = df[df["fid"].map(lambda i: ss.alloc.get(i, 0) > 0)].copy()
-    if chosen.empty:
-        st.caption("You haven't invested in any fund yet. Everything is currently cash.")
-    else:
-        chosen["amount"] = chosen["fid"].map(ss.alloc)
-        for _, r in chosen.sort_values("amount", ascending=False).iterrows():
-            share = r["amount"] / TOTAL
-            st.markdown(f'<div style="display:flex;justify-content:space-between;font-size:14px">'
-                        f'<span>{esc(r["fund_name"])}</span><b>₹{inr(r["amount"])} · {share:.0%}</b></div>'
-                        f'<div class="bar"><div style="width:{min(share, 1) * 100:.1f}%"></div></div>',
+        if h:
+            st.markdown(f'<div class="inv" style="font-size:14px;margin-bottom:8px">You have: {holding_text(h)}</div>',
                         unsafe_allow_html=True)
-    if left > 0:
-        st.markdown(f'<div style="display:flex;justify-content:space-between;font-size:14px;color:#8a8a8a">'
-                    f'<span>Cash (not invested)</span><b>₹{inr(left)} · {left / TOTAL:.0%}</b></div>',
-                    unsafe_allow_html=True)
-    ok = st.checkbox("I'm happy with this portfolio", key="confirm")
-    if st.button("Confirm and submit", type="primary", use_container_width=True, disabled=not ok):
-        submit(df)
+        c1, c2 = st.columns(2)
+        c1.button("Buy", key="mode_buy", use_container_width=True,
+                  type="primary" if ss.mode == "buy" else "secondary", on_click=set_mode, args=("buy", name))
+        c2.button("SIP", key="mode_sip", use_container_width=True, disabled=not sip_ok,
+                  type="primary" if ss.mode == "sip" else "secondary", on_click=set_mode, args=("sip", name))
+        if not sip_ok:
+            st.caption("SIP is not available for this fund.")
+
+        if ss.mode:
+            sip = ss.mode == "sip"
+            with st.container(border=True):
+                if sip:
+                    st.markdown(f"**Start a monthly SIP**  \nRuns for {SIP_MONTHS} months. "
+                                f"You can commit up to ₹{inr(room)} in total, so at most ₹{inr(room // SIP_MONTHS)}/month.")
+                else:
+                    st.markdown(f"**One-time purchase**  \nYou can invest up to ₹{inr(room)} here.")
+                start = h["amount"] if h and h["mode"] == ss.mode else 0
+                with st.form(f"form_{fid}_{ss.mode}", border=False):
+                    amt = st.number_input("Monthly amount (₹)" if sip else "Amount (₹)", min_value=0,
+                                          max_value=TOTAL, step=100 if sip else STEP, value=start)
+                    go = st.form_submit_button("Start SIP" if sip else "Buy now", use_container_width=True)
+                if go:
+                    minimum = f["min_sip"] if sip else f["min_lumpsum"]
+                    total = amt * (SIP_MONTHS if sip else 1)
+                    if amt <= 0:
+                        st.error("Enter an amount.")
+                    elif total > room:
+                        st.error(f"That's ₹{inr(total)} in total, more than the ₹{inr(room)} you have left.")
+                    elif amt < minimum:
+                        st.error(f"Minimum {'SIP' if sip else 'investment'} for this fund is ₹{inr(minimum)}.")
+                    else:
+                        ss.alloc[fid] = {"mode": ss.mode, "amount": int(amt)}
+                        log("set_amount", name, f"{ss.mode}:{int(amt)}")
+                        close_fund(name)
+                        st.rerun()
+        if h and st.button("Remove from portfolio", use_container_width=True):
+            ss.alloc[fid] = None
+            log("set_amount", name, "removed")
+            close_fund(name)
+            st.rerun()
 
 
 def submit(df):
     ss = st.session_state
     ss.submitted_at = now()
-    log("submit", value=sum(ss.alloc.values()))
+    log("submit", value=total_committed())
     pos = {fid: i + 1 for i, fid in enumerate(ss.order)}
     allocs = []
     for _, r in df.iterrows():
-        a = ss.alloc.get(r["fid"], 0)
-        if a > 0:
+        h = ss.alloc.get(r["fid"])
+        if h:
             allocs.append({"rid": ss.rid, "fund_name": r["fund_name"], "amc": r["amc"], "category": r["category"],
-                           "sub_category": r["sub_category"], "risk": r["risk"], "amount": a,
-                           "share": round(a / TOTAL, 4), "list_position": pos[r["fid"]]})
-    invested = sum(a["amount"] for a in allocs)
+                           "sub_category": r["sub_category"], "risk": r["risk"], "mode": h["mode"],
+                           "amount": h["amount"], "committed": committed(h),
+                           "share": round(committed(h) / TOTAL, 4), "list_position": pos[r["fid"]]})
+    invested = sum(a["committed"] for a in allocs)
     duration = (datetime.fromisoformat(ss.submitted_at) - datetime.fromisoformat(ss.started_at)).total_seconds()
     resp = {"rid": ss.rid, "name": ss.name, "app": ss.app, "started_at": ss.started_at,
             "submitted_at": ss.submitted_at, "seconds_taken": int(duration), "invested": invested,
             "cash": TOTAL - invested, "n_funds": len(allocs),
+            "n_sips": sum(1 for a in allocs if a["mode"] == "sip"),
             "largest_share": max((a["share"] for a in allocs), default=0),
             "funds_opened": len({e["fund"] for e in ss.events if e["event"] == "open_fund"})}
     try:
@@ -510,7 +607,17 @@ else:
         log("list_order", value=json.dumps([funds.set_index("fid").loc[i, "fund_name"] for i in ids]))
     if ss.step == "done":
         page_done(theme)
-    elif ss.view:
-        page_fund(funds, theme)
     else:
-        page_list(funds, theme)
+        topbar()
+        nav, body = st.columns([0.13, 0.87], gap="medium")
+        with nav:
+            sidenav()
+        with body:
+            if ss.view:
+                page_fund(funds)
+            else:
+                wallet()
+                if ss.tab == "portfolio":
+                    page_portfolio(funds)
+                else:
+                    page_explore(funds)

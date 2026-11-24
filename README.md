@@ -5,9 +5,10 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 ## Flow
 
 1. **Start**: name, and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
-2. **Explore**: a fund list showing only logo, name, AUM, plan, category and sub category, with category and sub category filters, search and sort. No investing here.
-3. **Fund page**: opened with View. Shows returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. This is the only place to invest, update or remove an amount.
-4. **Done**: shows their respondent ID and a button to the Google Form, with the ID pre-filled.
+2. **Mutual funds tab**: fund list showing only logo, name, AUM, plan, category and sub category, with filters, search and sort. Click a fund name to open it.
+3. **Fund page**: returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
+4. **Portfolio tab**: holdings with type, NAV, amount and allocation, plus cash left. Respondents confirm and submit here.
+5. **Done**: shows the respondent ID and a button to the Google Form, with the ID pre-filled.
 
 ## Files
 
@@ -79,6 +80,7 @@ streamlit run app.py
 ## Settings in app.py
 
 - `TOTAL`: investable amount (100000)
+- `SIP_MONTHS`: how many months an SIP runs for when counting it against the total (12)
 - `STEP`: step on the amount box (500)
 - `SHUFFLE_ORDER`: shows funds in a random order per respondent and logs it, so you can test whether position affects choice. Set to `False` to use the sheet's order.
 - `APPS`: the app list and each one's accent colour and layout.
