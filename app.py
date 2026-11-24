@@ -47,7 +47,7 @@ LOGO_PALETTES = [
 
 REQUIRED = ["fund_name", "amc", "category", "sub_category", "nav", "return_1y", "return_3y", "return_5y",
             "risk", "min_lumpsum", "exit_load", "expense_ratio", "fund_manager", "aum_cr"]
-OPTIONAL = ["plan", "min_sip", "launch_year"]
+OPTIONAL = ["plan", "min_sip", "launch_year", "scheme_code"]
 
 
 def secret(key, default=None):
@@ -215,6 +215,62 @@ def load_funds(path: str):
     return df, None
 
 
+@st.cache_data
+def load_nav(path: str):
+    """Optional sheet 'nav_history' with columns: scheme_code (or fund_name), date, nav."""
+    try:
+        nav = pd.read_excel(path, sheet_name="nav_history")
+    except Exception:
+        return None
+    nav.columns = [str(c).strip().lower().replace(" ", "_") for c in nav.columns]
+    if not {"date", "nav"} <= set(nav.columns):
+        return None
+    nav["date"] = pd.to_datetime(nav["date"], errors="coerce", dayfirst=True)
+    nav["nav"] = pd.to_numeric(nav["nav"], errors="coerce")
+    return nav.dropna(subset=["date", "nav"]).sort_values("date")
+
+
+PERIODS = {"3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60, "Max": None}
+
+
+def nav_chart(f):
+    nav = load_nav(str(DATA_FILE))
+    if nav is None:
+        return
+    if "scheme_code" in nav.columns and "scheme_code" in f and not pd.isna(f["scheme_code"]):
+        h = nav[nav["scheme_code"].astype(str) == str(f["scheme_code"]).split(".")[0]]
+    elif "fund_name" in nav.columns:
+        h = nav[nav["fund_name"] == f["fund_name"]]
+    else:
+        return
+    if len(h) < 2:
+        return
+    import altair as alt
+    key = "chart_period"
+    if key not in st.session_state:
+        st.session_state[key] = "3Y"
+    sel = st.session_state[key] or "3Y"
+    months = PERIODS[sel]
+    view = h if months is None else h[h["date"] >= h["date"].max() - pd.DateOffset(months=months)]
+    t = APPS[st.session_state.app]
+    up = view["nav"].iloc[-1] >= view["nav"].iloc[0]
+    colour = "#2E9E5B" if up else "#D64545"
+    chg = (view["nav"].iloc[-1] / view["nav"].iloc[0] - 1) * 100
+    st.markdown(f'<div style="display:flex;align-items:baseline;gap:10px;margin-top:4px">'
+                f'<span style="font-size:13px;color:#8a8a8a">NAV as of {view["date"].iloc[-1]:%d %b %Y}</span>'
+                f'<b style="font-size:20px;color:{colour}">₹{view["nav"].iloc[-1]:,.2f}</b>'
+                f'<span style="font-size:13px;color:{colour}">{chg:+.2f}% ({sel})</span></div>',
+                unsafe_allow_html=True)
+    base = alt.Chart(view).encode(
+        x=alt.X("date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8a8a8a", tickCount=6)),
+        y=alt.Y("nav:Q", title=None, scale=alt.Scale(domain=[view["nav"].min() * 0.95, view["nav"].max() * 1.03]), axis=alt.Axis(labelColor="#8a8a8a", gridColor="#f0f0f0")),
+        tooltip=[alt.Tooltip("date:T", title="Date", format="%d %b %Y"), alt.Tooltip("nav:Q", title="NAV", format=",.2f")])
+    chart = (base.mark_area(color=colour, opacity=0.08, clip=True) + base.mark_line(color=colour, strokeWidth=2)).properties(height=230)
+    st.altair_chart(chart.configure_view(strokeWidth=0), width="stretch")
+    st.segmented_control("Period", list(PERIODS), key=key, label_visibility="collapsed",
+                         on_change=lambda: log("chart_period", f["fund_name"], st.session_state.get(key)))
+
+
 def init_state():
     ss = st.session_state
     if "rid" not in ss:
@@ -234,7 +290,7 @@ def log(event, fund="", value=""):
 
 
 def committed(h):
-    return 0 if not h else h["amount"] * (SIP_MONTHS if h["mode"] == "sip" else 1)
+    return 0 if not h else h.get("buy", 0) + h.get("sip", 0) * SIP_MONTHS
 
 
 def total_committed(exclude=None):
@@ -275,7 +331,7 @@ def page_start():
         name = st.text_input("Your name", key="in_name", placeholder="First name is fine")
         app = st.selectbox("Which app do you mainly use to invest in mutual funds?", list(APPS.keys()),
                            index=None, placeholder="Select an app", key="in_app")
-        if st.button("Continue", type="primary", use_container_width=True):
+        if st.button("Continue", type="primary", width="stretch"):
             if not (name or "").strip() or not app:
                 st.error("Please enter your name and choose an app.")
                 return
@@ -295,33 +351,36 @@ def wallet():
     ss = st.session_state
     invested = total_committed()
     n = sum(1 for h in ss.alloc.values() if h)
-    st.markdown(f"""<div class="wallet"><div class="l">Hi {esc(ss.name)}, available to invest</div>
+    st.markdown(f"""<div class="wallet"><div class="l">Hi {esc(ss.name)}, cash available to invest</div>
 <div class="big">₹{inr(TOTAL - invested)}</div><div class="row">
 <div><span>Starting amount</span><b>₹{inr(TOTAL)}</b></div>
-<div><span>Invested</span><b>₹{inr(invested)}</b></div>
+<div><span>Invested amount</span><b>₹{inr(invested)}</b></div>
 <div><span>Funds chosen</span><b>{n}</b></div></div></div>""", unsafe_allow_html=True)
 
 
 def sidenav():
-    st.button("Mutual funds", key="nav_explore", icon=":material/work:", use_container_width=True,
+    st.button("Mutual funds", key="nav_explore", icon=":material/work:", width="stretch",
               on_click=set_tab, args=("explore",))
     n = sum(1 for h in st.session_state.alloc.values() if h)
     st.button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
-              use_container_width=True, on_click=set_tab, args=("portfolio",))
+              width="stretch", on_click=set_tab, args=("portfolio",))
     form_url, id_field = secret("form_url"), secret("form_id_field")
     if form_url:
         rid = st.session_state.rid
         link = f"{form_url}?usp=pp_url&{id_field}={rid}" if id_field else form_url
         st.markdown("<br>", unsafe_allow_html=True)
-        st.link_button("Questionnaire", link, icon=":material/assignment:", use_container_width=True)
+        st.link_button("Questionnaire", link, icon=":material/assignment:", width="stretch")
 
 
 def holding_text(h):
     if not h:
         return ""
-    if h["mode"] == "sip":
-        return f"SIP ₹{inr(h['amount'])}/month"
-    return f"Bought ₹{inr(h['amount'])}"
+    parts = []
+    if h.get("buy"):
+        parts.append(f"Bought ₹{inr(h['buy'])}")
+    if h.get("sip"):
+        parts.append(f"SIP ₹{inr(h['sip'])}/month")
+    return " · ".join(parts)
 
 
 SORTS = {"Default": (None, True), "Fund size: large to small": ("aum_cr", False),
@@ -372,7 +431,7 @@ def filter_panel(df):
     with st.expander("CAGR"):
         st.radio("Period", ["1Y", "3Y", "5Y"], key="f_cp", horizontal=True, index=1, on_change=logf("f_cp"))
         st.radio("Minimum CAGR", list(F_CAGR), key="f_cg", on_change=logf("f_cg"))
-    st.button("Reset filters", on_click=reset_filters, use_container_width=True)
+    st.button("Reset filters", on_click=reset_filters, width="stretch")
 
 
 def apply_filters(v):
@@ -465,8 +524,8 @@ def page_portfolio(df):
         st.info("You haven't invested in any fund yet. Everything is currently cash.")
         st.button("Explore mutual funds", type="primary", on_click=set_tab, args=("explore",))
         return
-    lump = sum(committed(h) for _, h in held if h["mode"] == "buy")
-    sip = sum(committed(h) for _, h in held if h["mode"] == "sip")
+    lump = sum(h.get("buy", 0) for _, h in held)
+    sip = sum(h.get("sip", 0) * SIP_MONTHS for _, h in held)
     st.markdown(f"""<div class="stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
 <div><span>Lump sum</span>₹{inr(lump)}</div><div><span>SIPs ({SIP_MONTHS} months)</span>₹{inr(sip)}</div>
 <div><span>Cash</span>₹{inr(TOTAL - lump - sip)}</div><div><span>Funds</span>{len(held)}</div></div>""",
@@ -489,8 +548,12 @@ def page_portfolio(df):
             st.markdown(f'<div class="fmeta" style="margin-top:-6px;font-size:13px"><span>{esc(f["plan"])}</span>'
                         f'<span>{esc(f["category"])}</span><span>{esc(f["sub_category"])}</span></div>',
                         unsafe_allow_html=True)
-        kind = (f'SIP<small>₹{inr(h["amount"])}/month × {SIP_MONTHS}</small>' if h["mode"] == "sip"
-                else f'Lump sum<small>{h["amount"] / f["nav"]:,.3f} units</small>')
+        kinds = []
+        if h.get("buy"):
+            kinds.append(f'Lump sum<small>{h["buy"] / f["nav"]:,.3f} units</small>')
+        if h.get("sip"):
+            kinds.append(f'SIP<small>₹{inr(h["sip"])}/month × {SIP_MONTHS}</small>')
+        kind = "<div style='height:6px'></div>".join(kinds)
         c[2].markdown(f'<div class="cell">{kind}</div>', unsafe_allow_html=True)
         c[3].markdown(f'<div class="cell">₹{inr(f["nav"], 2)}</div>', unsafe_allow_html=True)
         c[4].markdown(f'<div class="cell">₹{inr(committed(h))}</div>', unsafe_allow_html=True)
@@ -506,7 +569,7 @@ def page_fund(df):
     f = df.set_index("fid").loc[fid]
     name = f["fund_name"]
     h = ss.alloc.get(fid)
-    room = TOTAL - total_committed(exclude=fid)
+    room = TOTAL - total_committed()
     sip_ok = not pd.isna(f["min_sip"])
 
     st.button("← Back to " + ("portfolio" if ss.tab == "portfolio" else "all funds"), on_click=close_fund, args=(name,))
@@ -519,6 +582,7 @@ def page_fund(df):
 
     a, b = st.columns([1.25, 1], gap="large")
     with a:
+        nav_chart(f)
         st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
 <div><span>3Y CAGR return</span><b>{pct(f['return_3y'])}</b></div>
 <div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
@@ -541,9 +605,9 @@ def page_fund(df):
             st.markdown(f'<div class="inv" style="font-size:14px;margin-bottom:8px">You have: {holding_text(h)}</div>',
                         unsafe_allow_html=True)
         c1, c2 = st.columns(2)
-        c1.button("Buy", key="mode_buy", use_container_width=True,
+        c1.button("Buy", key="mode_buy", width="stretch",
                   type="primary" if ss.mode == "buy" else "secondary", on_click=set_mode, args=("buy", name))
-        c2.button("SIP", key="mode_sip", use_container_width=True, disabled=not sip_ok,
+        c2.button("SIP", key="mode_sip", width="stretch", disabled=not sip_ok,
                   type="primary" if ss.mode == "sip" else "secondary", on_click=set_mode, args=("sip", name))
         if not sip_ok:
             st.caption("SIP is not available for this fund.")
@@ -551,16 +615,20 @@ def page_fund(df):
         if ss.mode:
             sip = ss.mode == "sip"
             with st.container(border=True):
+                has = h.get(ss.mode, 0) if h else 0
                 if sip:
-                    st.markdown(f"**Start a monthly SIP**  \nRuns for {SIP_MONTHS} months. "
+                    title = "Add to your monthly SIP" if has else "Start a monthly SIP"
+                    st.markdown(f"**{title}**  \nRuns for {SIP_MONTHS} months. "
                                 f"You can commit up to ₹{inr(room)} in total, so at most ₹{inr(room // SIP_MONTHS)}/month.")
                 else:
-                    st.markdown(f"**One-time purchase**  \nYou can invest up to ₹{inr(room)} here.")
-                start = h["amount"] if h and h["mode"] == ss.mode else 0
+                    title = "Buy more" if has else "One-time purchase"
+                    st.markdown(f"**{title}**  \nYou can invest up to ₹{inr(room)} here.")
+                start = 0
                 with st.form(f"form_{fid}_{ss.mode}", border=False):
                     amt = st.number_input("Monthly amount (₹)" if sip else "Amount (₹)", min_value=0,
                                           max_value=TOTAL, step=100 if sip else STEP, value=start)
-                    go = st.form_submit_button("Start SIP" if sip else "Buy now", use_container_width=True)
+                    go = st.form_submit_button(("Add to SIP" if has else "Start SIP") if sip else "Buy now",
+                                               width="stretch")
                 if go:
                     minimum = f["min_sip"] if sip else f["min_lumpsum"]
                     total = amt * (SIP_MONTHS if sip else 1)
@@ -568,20 +636,16 @@ def page_fund(df):
                         st.error("Enter an amount.")
                     elif total > room:
                         st.error(f"That's ₹{inr(total)} in total, more than the ₹{inr(room)} you have left.")
-                    elif amt < minimum:
+                    elif amt < minimum and not has:
                         st.error(f"Minimum {'SIP' if sip else 'investment'} for this fund is ₹{inr(minimum)}.")
                     else:
-                        ss.alloc[fid] = {"mode": ss.mode, "amount": int(amt)}
-                        log("set_amount", name, f"{ss.mode}:{int(amt)}")
+                        new = dict(h or {})
+                        new[ss.mode] = new.get(ss.mode, 0) + int(amt)
+                        ss.alloc[fid] = new
+                        log("buy" if not sip else "sip", name, int(amt))
                         persist(df)
                         close_fund(name)
                         st.rerun()
-        if h and st.button("Remove from portfolio", use_container_width=True):
-            ss.alloc[fid] = None
-            log("set_amount", name, "removed")
-            persist(df)
-            close_fund(name)
-            st.rerun()
 
 
 def persist(df):
@@ -596,14 +660,14 @@ def persist(df):
         if h:
             allocs.append({"rid": ss.rid, "snapshot": ss.snapshot, "fund_name": r["fund_name"], "amc": r["amc"],
                            "category": r["category"], "sub_category": r["sub_category"], "risk": r["risk"],
-                           "mode": h["mode"], "amount": h["amount"], "committed": committed(h),
+                           "lump_sum": h.get("buy", 0), "sip_monthly": h.get("sip", 0), "committed": committed(h),
                            "share": round(committed(h) / TOTAL, 4), "list_position": pos[r["fid"]]})
     invested = sum(a["committed"] for a in allocs)
     duration = (datetime.fromisoformat(ts) - datetime.fromisoformat(ss.started_at)).total_seconds()
     resp = {"rid": ss.rid, "snapshot": ss.snapshot, "name": ss.name, "app": ss.app,
             "started_at": ss.started_at, "saved_at": ts, "seconds_taken": int(duration), "invested": invested,
             "cash": TOTAL - invested, "n_funds": len(allocs),
-            "n_sips": sum(1 for a in allocs if a["mode"] == "sip"),
+            "n_sips": sum(1 for a in allocs if a["sip_monthly"]),
             "largest_share": max((a["share"] for a in allocs), default=0),
             "funds_opened": len({e["fund"] for e in ss.events if e["event"] == "open_fund"})}
     new_events = ss.events[ss.get("events_saved", 0):]

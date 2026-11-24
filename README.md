@@ -6,8 +6,8 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 
 1. **Start**: name, and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
 2. **Mutual funds tab**: fund list showing only logo, name, AUM, plan, category and sub category. Filters on the left: AMC, Category (with sub category), Dividend type, Min. purchase amount, Expense ratio, AUM, Exit load and CAGR. Search and sort at the top. Click a fund name to open it.
-3. **Fund page**: 1Y/3Y/5Y CAGR returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
-4. **Portfolio tab**: holdings with type, NAV, amount and allocation. There is no submit button: the portfolio is saved automatically after every Buy, SIP or removal.
+3. **Fund page**: NAV chart (3M to Max, from the `nav_history` sheet), 1Y/3Y/5Y CAGR returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
+4. **Portfolio tab**: holdings with type, NAV, amount and allocation. As in a real app, money can't be pulled back out: Buy adds to the lump sum and SIP adds to the monthly amount. The portfolio is saved automatically after every Buy or SIP.
 5. **Questionnaire**: a link in the side menu (shown once `form_url` is set in secrets) opens the Google Form with the respondent ID pre-filled.
 
 ## Files
@@ -41,12 +41,24 @@ One row per fund, first sheet, these headers in row 1:
 | min_sip | 100 | Optional |
 | aum_cr | 146784.53 | ₹ crore. Required, shown on the fund list |
 | launch_year | 2013 | Optional |
+| scheme_code | 122639 | AMFI scheme code. Links the fund to its NAV history, and lets `fetch_nav.py` fill NAV, CAGR and launch year |
+
+## NAV history (the chart)
+
+A second sheet called `nav_history` with columns `scheme_code`, `date`, `nav`. The easiest way to build it:
+
+```
+pip install pandas openpyxl requests
+python fetch_nav.py
+```
+
+Run this on your own computer. It reads each `scheme_code`, downloads the NAV history from mfapi.in (AMFI data), writes the `nav_history` sheet, and fills in `nav`, `return_1y`, `return_3y`, `return_5y` and `launch_year`. Set `AS_OF` in the script to freeze every fund at the same date.
 
 ## Where responses go
 
 Saved after every portfolio change, as a numbered **snapshot**:
 - **responses**: one row per snapshot (app, time taken so far, amount invested, cash, number of funds and SIPs, largest share, funds opened)
-- **allocations**: one row per fund held in each snapshot (Buy or SIP, amount, amount committed, share, list position)
+- **allocations**: one row per fund held in each snapshot (lump sum, monthly SIP, amount committed, share, list position)
 - **events**: every action with a timestamp (tab changes, filters, sorts, searches, funds opened, Buy/SIP chosen, amounts set)
 
 For analysis, use each respondent's **highest snapshot number** as their final portfolio. Earlier snapshots show how the portfolio changed along the way.
