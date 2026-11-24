@@ -1,6 +1,7 @@
 """Mutual fund allocation simulator, built for the Capitalmind 'Crossing the Chasm' study.
 
-Flow: start page (name + app used) -> explore list -> fund detail page (invest here) -> submit -> Google Form link.
+Flow: start page (name + app used) -> explore list -> fund page (Buy / SIP) -> portfolio tab.
+The portfolio is saved after every change; a Questionnaire link in the side menu opens the Google Form.
 Fund data is read from funds.xlsx. Responses go to Google Sheets if configured, otherwise to local CSV files.
 """
 
@@ -139,6 +140,10 @@ def base_css(t):
   font-size: 30px; color: {t['accent']};}}
 .st-key-nav_{st.session_state.get('tab', 'explore')} button {{background: {t['soft']};}}
 .hrow {{font-size: 13px; color: #8a8a8a;}}
+[data-testid="stExpander"] details {{border: none; border-bottom: 1px solid #eee; border-radius: 0;}}
+[data-testid="stExpander"] summary {{padding: 14px 4px;}}
+[data-testid="stExpander"] summary p {{font-size: 16px; color: #6b6b6b;}}
+[data-testid="stExpander"] summary:hover p {{color: {t['accent']};}}
 .cell {{font-size: 15px; color: #222; text-align: right;}}
 .cell small {{display: block; font-size: 12px; color: #8a8a8a;}}
 .stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button {{
@@ -283,19 +288,17 @@ def page_start():
 
 def topbar():
     ss = st.session_state
-    st.markdown(f'<div class="topbar"><div class="dot">₹</div><b>Mutual funds</b>'
-                f'<span>Research simulation in a {esc(ss.app)}-style layout · not affiliated with any app or fund house · no real money</span></div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="topbar"><div class="dot">₹</div><b>Mutual funds</b></div>', unsafe_allow_html=True)
 
 
 def wallet():
     ss = st.session_state
     invested = total_committed()
     n = sum(1 for h in ss.alloc.values() if h)
-    st.markdown(f"""<div class="wallet"><div class="l">Hi {esc(ss.name)}, your investable amount</div>
-<div class="big">₹{inr(TOTAL)}</div><div class="row">
+    st.markdown(f"""<div class="wallet"><div class="l">Hi {esc(ss.name)}, available to invest</div>
+<div class="big">₹{inr(TOTAL - invested)}</div><div class="row">
+<div><span>Starting amount</span><b>₹{inr(TOTAL)}</b></div>
 <div><span>Invested</span><b>₹{inr(invested)}</b></div>
-<div><span>Left as cash</span><b>₹{inr(TOTAL - invested)}</b></div>
 <div><span>Funds chosen</span><b>{n}</b></div></div></div>""", unsafe_allow_html=True)
 
 
@@ -305,6 +308,12 @@ def sidenav():
     n = sum(1 for h in st.session_state.alloc.values() if h)
     st.button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
               use_container_width=True, on_click=set_tab, args=("portfolio",))
+    form_url, id_field = secret("form_url"), secret("form_id_field")
+    if form_url:
+        rid = st.session_state.rid
+        link = f"{form_url}?usp=pp_url&{id_field}={rid}" if id_field else form_url
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.link_button("Questionnaire", link, icon=":material/assignment:", use_container_width=True)
 
 
 def holding_text(h):
@@ -315,48 +324,119 @@ def holding_text(h):
     return f"Bought ₹{inr(h['amount'])}"
 
 
+SORTS = {"Default": (None, True), "Fund size: large to small": ("aum_cr", False),
+         "Fund size: small to large": ("aum_cr", True), "3Y CAGR: high to low": ("return_3y", False),
+         "Expense ratio: low to high": ("expense_ratio", True), "Name: A to Z": ("fund_name", True)}
+F_MIN = {"Any": None, "Up to ₹500": 500, "Up to ₹1,000": 1000, "Up to ₹5,000": 5000}
+F_ER = {"Any": None, "Below 0.5%": (0, 0.5), "0.5% to 1%": (0.5, 1.0), "Above 1%": (1.0, 99)}
+F_AUM = {"Any": None, "Below ₹5,000 Cr": (0, 5000), "₹5,000 to 20,000 Cr": (5000, 20000),
+         "Above ₹20,000 Cr": (20000, 1e9)}
+F_EXIT = ["Any", "No exit load", "Has exit load"]
+F_CAGR = {"Any": None, "Above 10%": 10, "Above 15%": 15, "Above 20%": 20}
+FILTER_KEYS = ["f_amc", "flt", "subs", "f_plan", "f_min", "f_er", "f_aum", "f_exit", "f_cp", "f_cg"]
+
+
+def logf(key):
+    return lambda: log("filter_" + key, value=str(st.session_state.get(key)))
+
+
+def reset_filters():
+    for k in FILTER_KEYS:
+        st.session_state.pop(k, None)
+    log("filter_reset")
+
+
+def filter_panel(df):
+    ss = st.session_state
+    with st.expander("AMC"):
+        st.multiselect("AMC", sorted(df["amc"].dropna().unique()), key="f_amc", label_visibility="collapsed",
+                       placeholder="All fund houses", on_change=logf("f_amc"))
+    with st.expander("Category"):
+        cats = ["All"] + sorted(df["category"].dropna().unique().tolist())
+        st.radio("Category", cats, key="flt", label_visibility="collapsed", on_change=logf("flt"))
+        pool = df if ss.get("flt", "All") == "All" else df[df["category"] == ss.flt]
+        st.multiselect("Sub category", sorted(pool["sub_category"].dropna().unique()), key="subs",
+                       placeholder="Any sub category", on_change=logf("subs"))
+    with st.expander("Dividend type"):
+        st.multiselect("Dividend type", sorted(df["plan"].dropna().astype(str).unique()), key="f_plan",
+                       label_visibility="collapsed", placeholder="Any", on_change=logf("f_plan"))
+    with st.expander("Min. purchase amount"):
+        st.radio("Min. purchase amount", list(F_MIN), key="f_min", label_visibility="collapsed",
+                 on_change=logf("f_min"))
+    with st.expander("Expense ratio"):
+        st.radio("Expense ratio", list(F_ER), key="f_er", label_visibility="collapsed", on_change=logf("f_er"))
+    with st.expander("AUM"):
+        st.radio("AUM", list(F_AUM), key="f_aum", label_visibility="collapsed", on_change=logf("f_aum"))
+    with st.expander("Exit load"):
+        st.radio("Exit load", F_EXIT, key="f_exit", label_visibility="collapsed", on_change=logf("f_exit"))
+    with st.expander("CAGR"):
+        st.radio("Period", ["1Y", "3Y", "5Y"], key="f_cp", horizontal=True, index=1, on_change=logf("f_cp"))
+        st.radio("Minimum CAGR", list(F_CAGR), key="f_cg", on_change=logf("f_cg"))
+    st.button("Reset filters", on_click=reset_filters, use_container_width=True)
+
+
+def apply_filters(v):
+    """Returns the filtered list and labels for the active filters."""
+    ss, active = st.session_state, []
+    if ss.get("f_amc"):
+        v = v[v["amc"].isin(ss.f_amc)]
+        active += ss.f_amc
+    if ss.get("flt", "All") != "All":
+        v = v[v["category"] == ss.flt]
+        active.append(ss.flt)
+    if ss.get("subs"):
+        v = v[v["sub_category"].isin(ss.subs)]
+        active += ss.subs
+    if ss.get("f_plan"):
+        v = v[v["plan"].astype(str).isin(ss.f_plan)]
+        active += ss.f_plan
+    if F_MIN.get(ss.get("f_min", "Any")):
+        v = v[v["min_lumpsum"] <= F_MIN[ss.f_min]]
+        active.append("Min " + ss.f_min.lower())
+    if F_ER.get(ss.get("f_er", "Any")):
+        lo, hi = F_ER[ss.f_er]
+        v = v[(v["expense_ratio"] >= lo) & (v["expense_ratio"] < hi)]
+        active.append("Expense ratio " + ss.f_er.lower())
+    if F_AUM.get(ss.get("f_aum", "Any")):
+        lo, hi = F_AUM[ss.f_aum]
+        v = v[(v["aum_cr"] >= lo) & (v["aum_cr"] < hi)]
+        active.append("AUM " + ss.f_aum.lower())
+    if ss.get("f_exit", "Any") != "Any":
+        nil = v["exit_load"].astype(str).str.strip().str.lower().str.startswith(("nil", "0", "none"))
+        v = v[nil] if ss.f_exit == "No exit load" else v[~nil]
+        active.append(ss.f_exit)
+    if F_CAGR.get(ss.get("f_cg", "Any")):
+        p = ss.get("f_cp", "3Y")
+        v = v[v[f"return_{p.lower()}"] > F_CAGR[ss.f_cg]]
+        active.append(f"{p} CAGR {ss.f_cg.lower()}")
+    return v, active
+
+
 def page_explore(df):
     ss = st.session_state
     st.write("Treat this as your own money. Click any fund to see its details and invest. "
              "Anything you don't invest stays as cash.")
     left, right = st.columns([1, 3], gap="large")
     with left:
-        cats = ["All"] + sorted(df["category"].dropna().unique().tolist())
-        st.markdown("**Category**")
-        st.radio("Category", cats, key="flt", label_visibility="collapsed",
-                 on_change=lambda: log("filter_category", value=st.session_state.flt))
-        pool = df if ss.get("flt", "All") == "All" else df[df["category"] == ss.flt]
-        st.markdown("**Sub category**")
-        st.multiselect("Sub category", sorted(pool["sub_category"].dropna().unique()), key="subs",
-                       label_visibility="collapsed", placeholder="Any",
-                       on_change=lambda: log("filter_sub", value="|".join(st.session_state.subs)))
-        st.markdown("**Sort by**")
-        st.selectbox("Sort", ["Default", "Fund size: large to small", "Fund size: small to large", "Name: A to Z"],
-                     key="srt", label_visibility="collapsed",
-                     on_change=lambda: log("sort", value=st.session_state.srt))
-
+        filter_panel(df)
     with right:
-        st.text_input("Search", key="q", placeholder="Search for mutual funds or fund houses",
+        s1, s2 = st.columns([2.2, 1])
+        s1.text_input("Search", key="q", placeholder="Search for mutual funds or fund houses",
                       label_visibility="collapsed", on_change=lambda: log("search", value=st.session_state.q))
+        s2.selectbox("Sort", list(SORTS), key="srt", label_visibility="collapsed",
+                     on_change=lambda: log("sort", value=st.session_state.srt))
         view = df.set_index("fid").loc[ss.order].reset_index()
         view["position"] = range(1, len(view) + 1)
-        if ss.flt != "All":
-            view = view[view["category"] == ss.flt]
-        if ss.get("subs"):
-            view = view[view["sub_category"].isin(ss.subs)]
+        view, active = apply_filters(view)
         if ss.q:
             q = ss.q.lower()
             view = view[view["fund_name"].str.lower().str.contains(q, regex=False)
                         | view["amc"].str.lower().str.contains(q, regex=False)]
-        if ss.srt == "Fund size: large to small":
-            view = view.sort_values("aum_cr", ascending=False, na_position="last")
-        elif ss.srt == "Fund size: small to large":
-            view = view.sort_values("aum_cr", na_position="last")
-        elif ss.srt == "Name: A to Z":
-            view = view.sort_values("fund_name")
+        col, asc = SORTS[ss.srt]
+        if col:
+            view = view.sort_values(col, ascending=asc, na_position="last")
 
-        chips = "".join(f'<span class="pill">{esc(x)}</span>'
-                        for x in ([ss.flt] if ss.flt != "All" else []) + list(ss.get("subs", [])))
+        chips = "".join(f'<span class="pill">{esc(x)}</span>' for x in active)
         st.markdown(f'<div style="display:flex;justify-content:space-between;align-items:center;margin:2px 0 10px">'
                     f'<div>{chips}</div><span style="color:#8a8a8a;font-size:14px">{len(view)} results</span></div>',
                     unsafe_allow_html=True)
@@ -417,9 +497,7 @@ def page_portfolio(df):
         c[5].markdown(f'<div class="cell">{committed(h) / TOTAL:.0%}</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    ok = st.checkbox("I'm happy with this portfolio", key="confirm")
-    if st.button("Confirm and submit", type="primary", use_container_width=True, disabled=not ok):
-        submit(df)
+    st.caption("Your portfolio is saved automatically after every change.")
 
 
 def page_fund(df):
@@ -441,9 +519,9 @@ def page_fund(df):
 
     a, b = st.columns([1.25, 1], gap="large")
     with a:
-        st.markdown(f"""<div class="rets"><div><span>1Y returns</span><b>{pct(f['return_1y'])}</b></div>
-<div><span>3Y returns (p.a.)</span><b>{pct(f['return_3y'])}</b></div>
-<div><span>5Y returns (p.a.)</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
+<div><span>3Y CAGR return</span><b>{pct(f['return_3y'])}</b></div>
+<div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
         since = "–" if pd.isna(f["launch_year"]) else esc(int(f["launch_year"]))
         min_sip = "–" if pd.isna(f["min_sip"]) else f"₹{inr(f['min_sip'])}"
         st.markdown(f"""<div class="stats">
@@ -495,44 +573,46 @@ def page_fund(df):
                     else:
                         ss.alloc[fid] = {"mode": ss.mode, "amount": int(amt)}
                         log("set_amount", name, f"{ss.mode}:{int(amt)}")
+                        persist(df)
                         close_fund(name)
                         st.rerun()
         if h and st.button("Remove from portfolio", use_container_width=True):
             ss.alloc[fid] = None
             log("set_amount", name, "removed")
+            persist(df)
             close_fund(name)
             st.rerun()
 
 
-def submit(df):
+def persist(df):
+    """Save a snapshot of the current portfolio plus any new events. Called after every portfolio change."""
     ss = st.session_state
-    ss.submitted_at = now()
-    log("submit", value=total_committed())
+    ss.snapshot = ss.get("snapshot", 0) + 1
+    ts = now()
     pos = {fid: i + 1 for i, fid in enumerate(ss.order)}
     allocs = []
     for _, r in df.iterrows():
         h = ss.alloc.get(r["fid"])
         if h:
-            allocs.append({"rid": ss.rid, "fund_name": r["fund_name"], "amc": r["amc"], "category": r["category"],
-                           "sub_category": r["sub_category"], "risk": r["risk"], "mode": h["mode"],
-                           "amount": h["amount"], "committed": committed(h),
+            allocs.append({"rid": ss.rid, "snapshot": ss.snapshot, "fund_name": r["fund_name"], "amc": r["amc"],
+                           "category": r["category"], "sub_category": r["sub_category"], "risk": r["risk"],
+                           "mode": h["mode"], "amount": h["amount"], "committed": committed(h),
                            "share": round(committed(h) / TOTAL, 4), "list_position": pos[r["fid"]]})
     invested = sum(a["committed"] for a in allocs)
-    duration = (datetime.fromisoformat(ss.submitted_at) - datetime.fromisoformat(ss.started_at)).total_seconds()
-    resp = {"rid": ss.rid, "name": ss.name, "app": ss.app, "started_at": ss.started_at,
-            "submitted_at": ss.submitted_at, "seconds_taken": int(duration), "invested": invested,
+    duration = (datetime.fromisoformat(ts) - datetime.fromisoformat(ss.started_at)).total_seconds()
+    resp = {"rid": ss.rid, "snapshot": ss.snapshot, "name": ss.name, "app": ss.app,
+            "started_at": ss.started_at, "saved_at": ts, "seconds_taken": int(duration), "invested": invested,
             "cash": TOTAL - invested, "n_funds": len(allocs),
             "n_sips": sum(1 for a in allocs if a["mode"] == "sip"),
             "largest_share": max((a["share"] for a in allocs), default=0),
             "funds_opened": len({e["fund"] for e in ss.events if e["event"] == "open_fund"})}
+    new_events = ss.events[ss.get("events_saved", 0):]
     try:
-        save(resp, allocs, ss.events)
-        ss.saved = True
-    except Exception as e:  # keep the respondent moving even if saving fails
-        ss.saved = False
+        save(resp, allocs, new_events)
+        ss.events_saved = len(ss.events)
+        ss.save_error = None
+    except Exception as e:  # never block the respondent because saving failed
         ss.save_error = str(e)
-    ss.step = "done"
-    st.rerun()
 
 
 def save(resp, allocs, events):
@@ -555,33 +635,14 @@ def save(resp, allocs, events):
         tab("responses", list(resp)).append_row([str(v) for v in resp.values()])
         if allocs:
             tab("allocations", list(allocs[0])).append_rows([[str(v) for v in a.values()] for a in allocs])
-        tab("events", list(events[0])).append_rows([[str(v) for v in e.values()] for e in events])
+        if events:
+            tab("events", list(events[0])).append_rows([[str(v) for v in e.values()] for e in events])
     else:
         LOCAL_DIR.mkdir(exist_ok=True)
         for name, rows in [("responses", [resp]), ("allocations", allocs), ("events", events)]:
             if rows:
                 p = LOCAL_DIR / f"{name}.csv"
                 pd.DataFrame(rows).to_csv(p, mode="a", header=not p.exists(), index=False)
-
-
-def page_done(t):
-    ss = st.session_state
-    _, mid, _ = st.columns([1, 1.6, 1])
-    with mid:
-        st.markdown("### Thank you")
-        st.write("Your portfolio has been recorded. One last step: a short questionnaire (about 4 minutes).")
-        st.markdown(f"Your respondent ID is **{ss.rid}**.")
-        form_url, id_field = secret("form_url"), secret("form_id_field")
-        if form_url:
-            link = f"{form_url}?usp=pp_url&{id_field}={ss.rid}" if id_field else form_url
-            st.link_button("Open the questionnaire", link, type="primary", use_container_width=True)
-            if not id_field:
-                st.caption("Please enter your respondent ID at the start of the form.")
-        else:
-            st.info("Questionnaire link not set yet (add form_url in the app's secrets).")
-        if not ss.get("saved", True):
-            st.error(f"Your answers could not be saved: {ss.get('save_error', '')}. "
-                     "Please share your respondent ID with the research team.")
 
 
 # ---------------------------------------------------------------- main
@@ -605,9 +666,7 @@ else:
             random.Random(ss.rid).shuffle(ids)
         ss.order = ids
         log("list_order", value=json.dumps([funds.set_index("fid").loc[i, "fund_name"] for i in ids]))
-    if ss.step == "done":
-        page_done(theme)
-    else:
+    if True:
         topbar()
         nav, body = st.columns([0.13, 0.87], gap="medium")
         with nav:

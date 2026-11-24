@@ -5,10 +5,10 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 ## Flow
 
 1. **Start**: name, and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
-2. **Mutual funds tab**: fund list showing only logo, name, AUM, plan, category and sub category, with filters, search and sort. Click a fund name to open it.
-3. **Fund page**: returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
-4. **Portfolio tab**: holdings with type, NAV, amount and allocation, plus cash left. Respondents confirm and submit here.
-5. **Done**: shows the respondent ID and a button to the Google Form, with the ID pre-filled.
+2. **Mutual funds tab**: fund list showing only logo, name, AUM, plan, category and sub category. Filters on the left: AMC, Category (with sub category), Dividend type, Min. purchase amount, Expense ratio, AUM, Exit load and CAGR. Search and sort at the top. Click a fund name to open it.
+3. **Fund page**: 1Y/3Y/5Y CAGR returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
+4. **Portfolio tab**: holdings with type, NAV, amount and allocation. There is no submit button: the portfolio is saved automatically after every Buy, SIP or removal.
+5. **Questionnaire**: a link in the side menu (shown once `form_url` is set in secrets) opens the Google Form with the respondent ID pre-filled.
 
 ## Files
 
@@ -44,10 +44,12 @@ One row per fund, first sheet, these headers in row 1:
 
 ## Where responses go
 
-Three tables per respondent:
-- **responses**: one row per person (app, time taken, amount invested, cash, number of funds, largest share, details opened)
-- **allocations**: one row per fund chosen (amount, share, category, risk, position in their list)
-- **events**: every action with a timestamp (open/close details, amount changes, filter, sort, search, and the order the list was shown in)
+Saved after every portfolio change, as a numbered **snapshot**:
+- **responses**: one row per snapshot (app, time taken so far, amount invested, cash, number of funds and SIPs, largest share, funds opened)
+- **allocations**: one row per fund held in each snapshot (Buy or SIP, amount, amount committed, share, list position)
+- **events**: every action with a timestamp (tab changes, filters, sorts, searches, funds opened, Buy/SIP chosen, amounts set)
+
+For analysis, use each respondent's **highest snapshot number** as their final portfolio. Earlier snapshots show how the portfolio changed along the way.
 
 If Google Sheets is set up in secrets, rows go to tabs with those names. If not, they go to CSV files in `responses/`. **On Streamlit Cloud local files are wiped when the app restarts, so set up Google Sheets before sharing the link.**
 
@@ -80,6 +82,7 @@ streamlit run app.py
 ## Settings in app.py
 
 - `TOTAL`: investable amount (100000)
+- Fund `exit_load` text starting with "Nil" counts as no exit load in the filter.
 - `SIP_MONTHS`: how many months an SIP runs for when counting it against the total (12)
 - `STEP`: step on the amount box (500)
 - `SHUFFLE_ORDER`: shows funds in a random order per respondent and logs it, so you can test whether position affects choice. Set to `False` to use the sheet's order.
