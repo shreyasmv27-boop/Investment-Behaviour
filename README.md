@@ -5,8 +5,9 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 ## Flow
 
 1. **Start**: name, and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
-2. **Invest**: the fund list in a look that matches their app (accent colour and card or row layout). They can filter by category, search, sort, open fund details, and type an amount for any fund. Anything not invested stays as cash.
-3. **Done**: shows their respondent ID and a button to the Google Form, with the ID pre-filled.
+2. **Explore**: a fund list showing only logo, name, AUM, plan, category and sub category, with category and sub category filters, search and sort. No investing here.
+3. **Fund page**: opened with View. Shows returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. This is the only place to invest, update or remove an amount.
+4. **Done**: shows their respondent ID and a button to the Google Form, with the ID pre-filled.
 
 ## Files
 
@@ -27,7 +28,8 @@ One row per fund, first sheet, these headers in row 1:
 | fund_name | HDFC Flexi Cap Fund – Direct Growth | |
 | amc | HDFC Mutual Fund | |
 | category | Equity | Used for the filter tabs: Equity, Debt, Hybrid, Others |
-| sub_category | Flexi Cap | |
+| sub_category | Flexi Cap | Used for the sub category filter |
+| plan | Growth | Optional, defaults to Growth |
 | nav | 1875.42 | |
 | return_1y, return_3y, return_5y | 14.6 | Percent. Leave blank if the fund is too new |
 | risk | Very High | One of: Low, Low to Moderate, Moderate, Moderately High, High, Very High |
@@ -36,7 +38,7 @@ One row per fund, first sheet, these headers in row 1:
 | expense_ratio | 0.68 | Percent |
 | fund_manager | R. Mehta (since 2017) | Text |
 | min_sip | 100 | Optional |
-| aum_cr | 65400 | Optional, ₹ crore |
+| aum_cr | 146784.53 | ₹ crore. Required, shown on the fund list |
 | launch_year | 2013 | Optional |
 
 ## Where responses go
