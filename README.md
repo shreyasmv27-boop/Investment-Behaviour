@@ -15,7 +15,7 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 | File | What it is |
 |---|---|
 | `app.py` | The app |
-| `funds.xlsx` | Fund data. **Currently placeholder funds**, replace with the real sheet |
+| `funds.xlsx` | Fund data: 37 real funds. Columns `tag`, `source_url`, `is_capitalmind` are for your analysis only and are never shown to participants |
 | `requirements.txt` | Packages Streamlit Cloud installs |
 | `.streamlit/config.toml` | Base theme |
 | `.streamlit/secrets.toml.example` | Template for the Google Form link and Google Sheets saving |
@@ -52,7 +52,7 @@ pip install pandas openpyxl requests
 python fetch_nav.py
 ```
 
-Run this on your own computer. It reads each `scheme_code`, downloads the NAV history from mfapi.in (AMFI data), writes the `nav_history` sheet, and fills in `nav`, `return_1y`, `return_3y`, `return_5y` and `launch_year`. Set `AS_OF` in the script to freeze every fund at the same date.
+Run this on your own computer. It finds each fund's AMFI scheme code by name (or uses the one you typed), downloads the NAV history from mfapi.in and writes the `nav_history` sheet. Your own figures are left untouched unless you set `UPDATE_FIGURES = True`. Check the `matched_name` column afterwards. Until this has been run, fund pages simply show no chart.
 
 ## Where responses go
 

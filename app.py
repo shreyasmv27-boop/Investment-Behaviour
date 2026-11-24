@@ -588,11 +588,14 @@ def page_fund(df):
 <div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
         since = "–" if pd.isna(f["launch_year"]) else esc(int(f["launch_year"]))
         min_sip = "–" if pd.isna(f["min_sip"]) else f"₹{inr(f['min_sip'])}"
+        min_lump = "–" if not f["min_lumpsum"] else f"₹{inr(f['min_lumpsum'])}"
+        if not pd.isna(f["min_sip"]) and not f["min_sip"]:
+            min_sip = "–"
         st.markdown(f"""<div class="stats">
 <div><span>NAV</span>₹{inr(f['nav'], 2)}</div>
 <div><span>Fund size (AUM)</span>{aum}</div>
 <div><span>Expense ratio</span>{pct(f['expense_ratio'], 2)}</div>
-<div><span>Min. lump sum</span>₹{inr(f['min_lumpsum'])}</div>
+<div><span>Min. lump sum</span>{min_lump}</div>
 <div><span>Min. SIP</span>{min_sip}</div>
 <div><span>Launched</span>{since}</div>
 <div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
