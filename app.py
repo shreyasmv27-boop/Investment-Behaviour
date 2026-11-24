@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import random
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,38 @@ def now():
 
 
 # ---------------------------------------------------------------- visuals
+def scroll_top():
+    """Streamlit keeps the scroll position between pages; jump back to the top (needed on phones)."""
+    import streamlit.components.v1 as components
+    n = st.session_state.get("nav_count", 0)
+    with st.container(key="scrolltop"):
+        components.html(f"""<script>/* {n} */
+const go = () => {{ const d = window.parent.document;
+  ['[data-testid="stAppScrollToBottomContainer"]', '[data-testid="stMain"]', 'section.main', '.stMain']
+    .forEach(q => d.querySelectorAll(q).forEach(e => e.scrollTop = 0));
+  d.documentElement.scrollTop = 0; d.body.scrollTop = 0; window.parent.scrollTo(0, 0); }};
+go(); setTimeout(go, 80); setTimeout(go, 400);</script>""", height=0)
+
+
+def scroll_to(key, n):
+    """Bring the buy/SIP box into view after Buy or SIP is tapped."""
+    import streamlit.components.v1 as components
+    with st.container(key="scrollto"):
+        components.html(f"""<script>/* {n} */
+setTimeout(() => {{ const e = window.parent.document.querySelector('.st-key-{key}');
+  if (e) e.scrollIntoView({{behavior: 'smooth', block: 'end'}}); }}, 250);</script>""", height=0)
+
+
+def manager_links(names, amc):
+    """Each fund manager becomes a Google search link that opens in a new tab."""
+    out = []
+    for n in [x.strip() for x in str(names).split(",") if x.strip()]:
+        q = urllib.parse.quote_plus(f'"{n}" {amc} fund manager')
+        out.append(f'<a class="mgr" href="https://www.google.com/search?q={q}" target="_blank" '
+                   f'rel="noopener">{esc(n)}</a>')
+    return ", ".join(out) if out else "–"
+
+
 def logo(amc, size=44):
     """A colourful generated logo per fund house (deterministic, not a real brand mark)."""
     i = int(hashlib.md5(str(amc).encode()).hexdigest(), 16) % len(LOGO_PALETTES)
@@ -109,7 +142,7 @@ def risk_gauge(level):
     ang = math.radians(180 - i * 36)            # Low = left (180 deg), Very High = right (0 deg)
     cx, cy, r = 110, 108, 64
     x2, y2 = cx + r * math.cos(ang), cy - r * math.sin(ang)
-    return f"""<div class="gauge"><svg width="220" height="126" viewBox="0 0 220 126" role="img"
+    return f"""<div class="gauge"><svg width="150" height="86" viewBox="0 0 220 126" role="img"
 aria-label="Risk level {esc(level)}"><defs><linearGradient id="rg" x1="0" x2="1" y1="0" y2="0">
 <stop offset="0" stop-color="#7CC47F"/><stop offset=".45" stop-color="#F6EE6E"/>
 <stop offset=".75" stop-color="#F3A15C"/><stop offset="1" stop-color="#E0554A"/></linearGradient></defs>
@@ -130,15 +163,6 @@ def base_css(t):
 .stButton button[kind="tertiary"]:hover {{color: {t['accent']}; text-decoration: underline;}}
 .st-key-mode_buy button, .st-key-mode_sip button {{border-radius: 999px; height: 46px;}}
 .st-key-mode_buy button p, .st-key-mode_sip button p {{font-size: 17px; font-weight: 600;}}
-.st-key-nav_explore button, .st-key-nav_portfolio button {{flex-direction: column; height: 84px; border: none;
-  background: transparent; border-radius: 14px;}}
-.st-key-nav_explore button p, .st-key-nav_portfolio button p {{font-size: 14px; white-space: normal;
-  overflow: visible; text-overflow: clip; line-height: 1.2;}}
-.st-key-nav_explore button div, .st-key-nav_portfolio button div {{flex-direction: column; gap: 6px;}}
-.st-key-nav_explore button:hover, .st-key-nav_portfolio button:hover {{background: {t['soft']};}}
-.st-key-nav_explore [data-testid="stIconMaterial"], .st-key-nav_portfolio [data-testid="stIconMaterial"] {{
-  font-size: 30px; color: {t['accent']};}}
-.st-key-nav_{st.session_state.get('tab', 'explore')} button {{background: {t['soft']};}}
 .hrow {{font-size: 13px; color: #8a8a8a;}}
 [data-testid="stExpander"] details {{border: none; border-bottom: 1px solid #eee; border-radius: 0;}}
 [data-testid="stExpander"] summary {{padding: 14px 4px;}}
@@ -184,7 +208,58 @@ def base_css(t):
 .bar > div {{height:100%; background:{t['accent']};}}
 .note {{font-size:12px; color:#8a8a8a; background:#f7f7f7; border-radius:8px; padding:6px 10px; margin-top:16px;}}
 [data-testid="stVerticalBlockBorderWrapper"] {{border-radius:14px;}}
-@media (max-width: 640px) {{ .stats {{grid-template-columns:1fr 1fr;}} }}
+.block-container {{max-width: 820px;}}
+.st-key-scrolltop, .st-key-scrollto {{position:absolute; height:0; overflow:hidden;}}
+/* keep chosen rows side by side on phones (Streamlit stacks columns below 640px) */
+.st-key-tabs [data-testid="stHorizontalBlock"], .st-key-tools [data-testid="stHorizontalBlock"],
+[class*="st-key-row_"] [data-testid="stHorizontalBlock"], [class*="st-key-prow_"] [data-testid="stHorizontalBlock"],
+.st-key-actions [data-testid="stHorizontalBlock"], .st-key-actions_open [data-testid="stHorizontalBlock"] {{
+  flex-wrap:nowrap !important;}}
+.st-key-tabs [data-testid="stColumn"], .st-key-tools [data-testid="stColumn"],
+.st-key-actions [data-testid="stColumn"], .st-key-actions_open [data-testid="stColumn"] {{
+  min-width:0 !important; flex:1 1 0 !important; width:auto !important;}}
+[class*="st-key-row_"] [data-testid="stColumn"]:first-child, [class*="st-key-prow_"] [data-testid="stColumn"]:first-child {{
+  min-width:0 !important; flex:0 0 46px !important; width:46px !important;}}
+[class*="st-key-row_"] [data-testid="stColumn"]:last-child, [class*="st-key-prow_"] [data-testid="stColumn"]:last-child {{
+  min-width:0 !important; flex:1 1 0 !important; width:auto !important;}}
+.st-key-tabs button {{height:46px; border-radius:12px; border:1px solid #eee;}}
+.st-key-tabs button p {{font-size:15px; font-weight:500;}}
+.st-key-nav_{st.session_state.get('tab', 'explore')} button {{background:{t['soft']}; border-color:{t['soft']};
+  color:{t['accent']};}}
+.st-key-tools button {{height:40px;}}
+.intro {{font-size:15px; color:#555; margin:2px 0 8px;}}
+.chips {{display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0 10px;}}
+.chips .pill {{margin:0;}}
+.chips .count {{margin-left:auto; color:#8a8a8a; font-size:14px;}}
+.stButton button[kind="tertiary"] {{text-align:left; white-space:normal; height:auto;}}
+.stButton button[kind="tertiary"] p, .stButton button[kind="tertiary"] div {{white-space:normal !important;
+  overflow:visible !important; text-overflow:clip !important; line-height:1.3;}}
+[data-testid="stFormSubmitButton"] button {{background:{t['accent']} !important; border-color:{t['accent']} !important;
+  color:#fff !important; border-radius:10px; height:46px;}}
+[data-testid="stFormSubmitButton"] button p {{color:#fff !important; font-weight:600; font-size:16px;}}
+a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['accent']}88;}}
+.stats.four {{grid-template-columns:repeat(4,1fr);}}
+.hold {{margin-top:4px;}}
+.hold > div:not(.bar) {{display:flex; justify-content:space-between; gap:10px; font-size:15px; padding:3px 0;}}
+.hold span {{color:#8a8a8a; font-size:13px;}}
+.hold .tot {{border-top:1px solid #f0f0f0; margin-top:6px; padding-top:8px !important;}}
+.hold .bar {{margin:4px 0 0;}}
+.st-key-actions {{margin-top:14px;}}
+.st-key-actions_open {{margin-top:14px; padding-bottom:10px;}}
+@media (max-width: 640px) {{
+  .block-container {{padding: 1.2rem 1rem 6.5rem !important;}}
+  .stats {{grid-template-columns:1fr 1fr;}}
+  .stats.four {{grid-template-columns:1fr 1fr;}}
+  .stats div {{padding:10px 12px; font-size:14px;}}
+  .rets {{gap:8px;}} .rets div {{padding:8px 10px;}} .rets b {{font-size:17px;}} .rets span {{font-size:11px;}}
+  .wallet {{padding:16px 18px;}} .wallet .big {{font-size:28px;}} .wallet .row {{gap:18px;}}
+  .fname {{font-size:16px;}}
+  .fmeta {{font-size:13px; gap:10px;}}
+  .gauge {{gap:14px;}}
+  /* Buy / SIP stay pinned to the bottom of the screen, like an app */
+  .st-key-actions {{position:fixed; left:0; right:0; bottom:0; z-index:999; background:#fff; margin:0;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom)); box-shadow:0 -4px 16px rgba(0,0,0,.08);}}
+}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -301,22 +376,27 @@ def open_fund(fid, name, position):
     ss = st.session_state
     ss.view = fid
     ss.mode = None
+    ss.nav_count = ss.get("nav_count", 0) + 1
     log("open_fund", name, f"{ss.tab}:{position}")
 
 
 def set_tab(tab):
     st.session_state.tab = tab
     st.session_state.view = None
+    st.session_state.nav_count = st.session_state.get("nav_count", 0) + 1
     log("tab", value=tab)
 
 
 def set_mode(mode, name):
     st.session_state.mode = mode
+    st.session_state.mode_count = st.session_state.get("mode_count", 0) + 1
     log("choose_mode", name, mode)
 
 
 def close_fund(name):
     st.session_state.view = None
+    st.session_state.mode = None
+    st.session_state.nav_count = st.session_state.get("nav_count", 0) + 1
     log("close_fund", name)
 
 
@@ -358,18 +438,19 @@ def wallet():
 <div><span>Funds chosen</span><b>{n}</b></div></div></div>""", unsafe_allow_html=True)
 
 
-def sidenav():
-    st.button("Mutual funds", key="nav_explore", icon=":material/work:", width="stretch",
-              on_click=set_tab, args=("explore",))
-    n = sum(1 for h in st.session_state.alloc.values() if h)
-    st.button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
-              width="stretch", on_click=set_tab, args=("portfolio",))
+def tabs():
+    ss = st.session_state
+    n = sum(1 for h in ss.alloc.values() if h)
     form_url, id_field = secret("form_url"), secret("form_id_field")
-    if form_url:
-        rid = st.session_state.rid
-        link = f"{form_url}?usp=pp_url&{id_field}={rid}" if id_field else form_url
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.link_button("Questionnaire", link, icon=":material/assignment:", width="stretch")
+    with st.container(key="tabs"):
+        cols = st.columns(3 if form_url else 2, gap="small")
+        cols[0].button("Mutual funds", key="nav_explore", icon=":material/work:", width="stretch",
+                       on_click=set_tab, args=("explore",))
+        cols[1].button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
+                       width="stretch", on_click=set_tab, args=("portfolio",))
+        if form_url:
+            link = f"{form_url}?usp=pp_url&{id_field}={ss.rid}" if id_field else form_url
+            cols[2].link_button("Questionnaire", link, icon=":material/assignment:", width="stretch")
 
 
 def holding_text(h):
@@ -473,47 +554,46 @@ def apply_filters(v):
 
 def page_explore(df):
     ss = st.session_state
-    st.write("Treat this as your own money. Click any fund to see its details and invest. "
-             "Anything you don't invest stays as cash.")
-    left, right = st.columns([1, 3], gap="large")
-    with left:
-        filter_panel(df)
-    with right:
-        s1, s2 = st.columns([2.2, 1])
-        s1.text_input("Search", key="q", placeholder="Search for mutual funds or fund houses",
-                      label_visibility="collapsed", on_change=lambda: log("search", value=st.session_state.q))
-        s2.selectbox("Sort", list(SORTS), key="srt", label_visibility="collapsed",
+    st.markdown('<p class="intro">Treat this as your own money. Tap any fund to see its details and invest. '
+                "Anything you don't invest stays as cash.</p>", unsafe_allow_html=True)
+    st.text_input("Search", key="q", placeholder="Search funds or fund houses", label_visibility="collapsed",
+                  on_change=lambda: log("search", value=st.session_state.q))
+    view = df.set_index("fid").loc[ss.order].reset_index()
+    view["position"] = range(1, len(view) + 1)
+    view, active = apply_filters(view)
+    with st.container(key="tools"):
+        c1, c2 = st.columns([1, 1.3], gap="small")
+        with c1.popover(f"Filters ({len(active)})" if active else "Filters", icon=":material/tune:",
+                        width="stretch"):
+            filter_panel(df)
+        c2.selectbox("Sort", list(SORTS), key="srt", label_visibility="collapsed",
                      on_change=lambda: log("sort", value=st.session_state.srt))
-        view = df.set_index("fid").loc[ss.order].reset_index()
-        view["position"] = range(1, len(view) + 1)
-        view, active = apply_filters(view)
-        if ss.q:
-            q = ss.q.lower()
-            view = view[view["fund_name"].str.lower().str.contains(q, regex=False)
-                        | view["amc"].str.lower().str.contains(q, regex=False)]
-        col, asc = SORTS[ss.srt]
-        if col:
-            view = view.sort_values(col, ascending=asc, na_position="last")
+    if ss.q:
+        q = ss.q.lower()
+        view = view[view["fund_name"].str.lower().str.contains(q, regex=False)
+                    | view["amc"].str.lower().str.contains(q, regex=False)]
+    col, asc = SORTS[ss.srt]
+    if col:
+        view = view.sort_values(col, ascending=asc, na_position="last")
 
-        chips = "".join(f'<span class="pill">{esc(x)}</span>' for x in active)
-        st.markdown(f'<div style="display:flex;justify-content:space-between;align-items:center;margin:2px 0 10px">'
-                    f'<div>{chips}</div><span style="color:#8a8a8a;font-size:14px">{len(view)} results</span></div>',
-                    unsafe_allow_html=True)
-        if view.empty:
-            st.info("No funds match. Try another category or search.")
-        for _, f in view.iterrows():
-            h = ss.alloc.get(f["fid"])
-            with st.container(border=True):
-                c0, c1 = st.columns([0.09, 0.91], vertical_alignment="center")
-                c0.markdown(logo(f["amc"]), unsafe_allow_html=True)
-                with c1:
-                    st.button(f["fund_name"], key=f"open_{f['fid']}", type="tertiary",
-                              on_click=open_fund, args=(f["fid"], f["fund_name"], int(f["position"])))
-                    aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
-                    badge = f'<span class="inv">{holding_text(h)}</span>' if h else ""
-                    st.markdown(f'<div class="fmeta" style="margin-top:-6px"><span>AUM <b>{aum}</b></span>'
-                                f'<span>{esc(f["plan"])}</span><span>{esc(f["category"])}</span>'
-                                f'<span>{esc(f["sub_category"])}</span>{badge}</div>', unsafe_allow_html=True)
+    chips = "".join(f'<span class="pill">{esc(x)}</span>' for x in active)
+    st.markdown(f'<div class="chips">{chips}<span class="count">{len(view)} funds</span></div>',
+                unsafe_allow_html=True)
+    if view.empty:
+        st.info("No funds match. Try another filter or search.")
+    for _, f in view.iterrows():
+        h = ss.alloc.get(f["fid"])
+        with st.container(border=True, key=f"row_{f['fid']}"):
+            c0, c1 = st.columns([1, 6], vertical_alignment="center", gap="small")
+            c0.markdown(logo(f["amc"]), unsafe_allow_html=True)
+            with c1:
+                st.button(f["fund_name"], key=f"open_{f['fid']}", type="tertiary",
+                          on_click=open_fund, args=(f["fid"], f["fund_name"], int(f["position"])))
+                aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
+                badge = f'<span class="inv">{holding_text(h)}</span>' if h else ""
+                st.markdown(f'<div class="fmeta" style="margin-top:-6px"><span>{esc(f["category"])} · '
+                            f'{esc(f["sub_category"])}</span><span>AUM <b>{aum}</b></span>{badge}</div>',
+                            unsafe_allow_html=True)
 
 
 def page_portfolio(df):
@@ -526,40 +606,32 @@ def page_portfolio(df):
         return
     lump = sum(h.get("buy", 0) for _, h in held)
     sip = sum(h.get("sip", 0) * SIP_MONTHS for _, h in held)
-    st.markdown(f"""<div class="stats" style="grid-template-columns:repeat(4,1fr);margin-bottom:18px">
-<div><span>Lump sum</span>₹{inr(lump)}</div><div><span>SIPs ({SIP_MONTHS} months)</span>₹{inr(sip)}</div>
+    st.markdown(f"""<div class="stats four" style="margin-bottom:18px">
+<div><span>Lump sum</span>₹{inr(lump)}</div><div><span>SIPs ({SIP_MONTHS} mo.)</span>₹{inr(sip)}</div>
 <div><span>Cash</span>₹{inr(TOTAL - lump - sip)}</div><div><span>Funds</span>{len(held)}</div></div>""",
                 unsafe_allow_html=True)
-
-    widths = [0.06, 0.4, 0.16, 0.12, 0.14, 0.12]
-    hdr = st.columns(widths)
-    for c, label in zip(hdr[1:], ["Fund", "Type", "NAV", "Amount", "Allocation"]):
-        c.markdown(f'<div class="hrow" style="text-align:{"left" if label == "Fund" else "right"}">{label}</div>',
-                   unsafe_allow_html=True)
     fx = df.set_index("fid")
     for fid, h in sorted(held, key=lambda x: -committed(x[1])):
         f = fx.loc[fid]
-        st.markdown('<hr style="margin:4px 0 10px;border:none;border-top:1px solid #eee">', unsafe_allow_html=True)
-        c = st.columns(widths, vertical_alignment="center")
-        c[0].markdown(logo(f["amc"], 36), unsafe_allow_html=True)
-        with c[1]:
-            st.button(f["fund_name"], key=f"pf_{fid}", type="tertiary", on_click=open_fund,
-                      args=(fid, f["fund_name"], ss.order.index(fid) + 1))
-            st.markdown(f'<div class="fmeta" style="margin-top:-6px;font-size:13px"><span>{esc(f["plan"])}</span>'
-                        f'<span>{esc(f["category"])}</span><span>{esc(f["sub_category"])}</span></div>',
-                        unsafe_allow_html=True)
-        kinds = []
-        if h.get("buy"):
-            kinds.append(f'Lump sum<small>{h["buy"] / f["nav"]:,.3f} units</small>')
-        if h.get("sip"):
-            kinds.append(f'SIP<small>₹{inr(h["sip"])}/month × {SIP_MONTHS}</small>')
-        kind = "<div style='height:6px'></div>".join(kinds)
-        c[2].markdown(f'<div class="cell">{kind}</div>', unsafe_allow_html=True)
-        c[3].markdown(f'<div class="cell">₹{inr(f["nav"], 2)}</div>', unsafe_allow_html=True)
-        c[4].markdown(f'<div class="cell">₹{inr(committed(h))}</div>', unsafe_allow_html=True)
-        c[5].markdown(f'<div class="cell">{committed(h) / TOTAL:.0%}</div>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+        with st.container(border=True, key=f"prow_{fid}"):
+            c0, c1 = st.columns([1, 6], vertical_alignment="center", gap="small")
+            c0.markdown(logo(f["amc"], 40), unsafe_allow_html=True)
+            with c1:
+                st.button(f["fund_name"], key=f"pf_{fid}", type="tertiary", on_click=open_fund,
+                          args=(fid, f["fund_name"], ss.order.index(fid) + 1))
+                st.markdown(f'<div class="fmeta" style="margin-top:-6px"><span>{esc(f["category"])} · '
+                            f'{esc(f["sub_category"])}</span></div>', unsafe_allow_html=True)
+            lines = []
+            if h.get("buy"):
+                lines.append(f'<div><span>Lump sum · {h["buy"] / f["nav"]:,.3f} units @ ₹{inr(f["nav"], 2)}</span>'
+                             f'<b>₹{inr(h["buy"])}</b></div>')
+            if h.get("sip"):
+                lines.append(f'<div><span>SIP · ₹{inr(h["sip"])}/month × {SIP_MONTHS}</span>'
+                             f'<b>₹{inr(h["sip"] * SIP_MONTHS)}</b></div>')
+            share = committed(h) / TOTAL
+            st.markdown(f'<div class="hold">{"".join(lines)}<div class="tot"><span>Allocation</span>'
+                        f'<b>{share:.0%}</b></div><div class="bar"><div style="width:{share * 100:.1f}%"></div>'
+                        f'</div></div>', unsafe_allow_html=True)
     st.caption("Your portfolio is saved automatically after every change.")
 
 
@@ -575,17 +647,17 @@ def page_fund(df):
     st.button("← Back to " + ("portfolio" if ss.tab == "portfolio" else "all funds"), on_click=close_fund, args=(name,))
     aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
     st.markdown(f'<div class="fhead" style="margin:8px 0 6px">{logo(f["amc"], 60)}<div>'
-                f'<div class="fname" style="font-size:24px">{esc(name)}</div>'
+                f'<div class="fname" style="font-size:22px">{esc(name)}</div>'
                 f'<div class="fmeta"><span>{esc(f["amc"])}</span><span>{esc(f["plan"])}</span>'
-                f'<span>{esc(f["category"])}</span><span>{esc(f["sub_category"])}</span></div></div></div>',
+                f'<span>{esc(f["category"])} · {esc(f["sub_category"])}</span></div></div></div>',
                 unsafe_allow_html=True)
 
-    a, b = st.columns([1.25, 1], gap="large")
-    with a:
+    if True:
         nav_chart(f)
         st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
 <div><span>3Y CAGR return</span><b>{pct(f['return_3y'])}</b></div>
 <div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
+        st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
         since = "–" if pd.isna(f["launch_year"]) else esc(int(f["launch_year"]))
         min_sip = "–" if pd.isna(f["min_sip"]) else f"₹{inr(f['min_sip'])}"
         min_lump = "–" if not f["min_lumpsum"] else f"₹{inr(f['min_lumpsum'])}"
@@ -599,11 +671,12 @@ def page_fund(df):
 <div><span>Min. SIP</span>{min_sip}</div>
 <div><span>Launched</span>{since}</div>
 <div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
-<div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{esc(f['fund_manager'])}</div>
+<div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{manager_links(f['fund_manager'], f['amc'])}</div>
 </div>""", unsafe_allow_html=True)
 
-    with b:
-        st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
+    if ss.mode:
+        scroll_to("actions_open", ss.get("mode_count", 0))
+    with st.container(key="actions_open" if ss.mode else "actions"):
         if h:
             st.markdown(f'<div class="inv" style="font-size:14px;margin-bottom:8px">You have: {holding_text(h)}</div>',
                         unsafe_allow_html=True)
@@ -734,16 +807,14 @@ else:
         ss.order = ids
         log("list_order", value=json.dumps([funds.set_index("fid").loc[i, "fund_name"] for i in ids]))
     if True:
-        topbar()
-        nav, body = st.columns([0.13, 0.87], gap="medium")
-        with nav:
-            sidenav()
-        with body:
-            if ss.view:
-                page_fund(funds)
+        scroll_top()
+        if ss.view:
+            page_fund(funds)
+        else:
+            topbar()
+            tabs()
+            wallet()
+            if ss.tab == "portfolio":
+                page_portfolio(funds)
             else:
-                wallet()
-                if ss.tab == "portfolio":
-                    page_portfolio(funds)
-                else:
-                    page_explore(funds)
+                page_explore(funds)
