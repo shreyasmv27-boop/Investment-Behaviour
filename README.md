@@ -99,3 +99,23 @@ streamlit run app.py
 - `STEP`: step on the amount box (500)
 - `SHUFFLE_ORDER`: shows funds in a random order per respondent and logs it, so you can test whether position affects choice. Set to `False` to use the sheet's order.
 - `APPS`: the app list and each one's accent colour and layout.
+
+## What gets saved (Google Sheet tabs)
+
+| Tab | One row per | Main columns |
+|---|---|---|
+| `investors` | investor (updated as they go) | name, app, status (in progress / completed), invested, cash, funds, SIPs, Capitalmind amount, funds opened, taps, minutes |
+| `purchases` | every Buy or SIP | fund, type, amount, monthly SIP, list position |
+| `portfolio` | fund in the final, submitted portfolio | lump sum, SIP, committed, share |
+| `clicks` | every tap | time, seconds from start, screen, action, fund, detail |
+
+Tabs are created automatically the first time someone uses the app. Writing happens in the background, so taps never wait for Google.
+Taps on the filter button itself and on the dialog's close (X) can't be recorded; every filter change, the fund manager links and all other buttons are.
+
+## Dashboard
+
+Open `<your app url>/?admin=1` and enter `admin_password` from Secrets. Tabs: Investors (everyone, with status), One investor (their portfolio and every tap in order), Funds (opened vs bought, money per fund), Download (CSV of each table).
+
+## NAV charts
+
+`nav_history.csv` (columns `fund_name`, `date`, `nav`) feeds the fund page charts. `fund_name` must match `funds.xlsx` exactly.

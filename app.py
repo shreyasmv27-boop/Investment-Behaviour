@@ -1,17 +1,21 @@
 """Mutual fund allocation simulator, built for the Capitalmind 'Crossing the Chasm' study.
 
-Flow: start page (name + app used) -> explore list -> fund page (Buy / SIP) -> portfolio tab.
-The portfolio is saved after every change; a Questionnaire link in the side menu opens the Google Form.
-Fund data is read from funds.xlsx. Responses go to Google Sheets if configured, otherwise to local CSV files.
+Flow: start page (name + app used) -> fund list -> fund page (Buy / SIP) -> portfolio -> Completed -> thank you.
+Every tap is logged. Data goes to Google Sheets if configured (tabs: investors, purchases, portfolio, clicks),
+otherwise to CSV files in responses/. The researcher dashboard is at  <app url>/?admin=1  (password in Secrets).
+Fund data: funds.xlsx. NAV history for the charts: nav_history.csv.
 """
 
 import hashlib
 import html
 import json
+import queue
 import random
+import threading
+import time
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +29,8 @@ STEP = 500                   # amount input step
 SIP_MONTHS = 12            # an SIP commits monthly amount x SIP_MONTHS out of the Rs 1,00,000
 SHUFFLE_ORDER = True         # random fund order per respondent; the order is logged to test position effects
 DATA_FILE = Path(__file__).parent / "funds.xlsx"
+NAV_FILE = Path(__file__).parent / "nav_history.csv"
+FLUSH_EVERY = 6              # send clicks to the database after this many taps (plus at every purchase / completion)
 LOCAL_DIR = Path(__file__).parent / "responses"
 
 # Accent colours are approximate and only set the feel. No real logos or wordmarks are used.
@@ -86,41 +92,67 @@ def esc(v):
     return html.escape("" if pd.isna(v) else str(v))
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------- visuals
+def run_js(code):
+    """Run a small script in the page (scrolling, redirect). Uses st.iframe on new Streamlit, components.html on old."""
+    doc = f"<script>{code}</script>"
+    if hasattr(st, "iframe"):
+        st.iframe(doc, height=1)
+    else:
+        import streamlit.components.v1 as components
+        components.html(doc, height=0)
+
+
 def scroll_top():
     """Streamlit keeps the scroll position between pages; jump back to the top (needed on phones)."""
-    import streamlit.components.v1 as components
     n = st.session_state.get("nav_count", 0)
     with st.container(key="scrolltop"):
-        components.html(f"""<script>/* {n} */
+        run_js(f"""/* {n} */
 const go = () => {{ const d = window.parent.document;
   ['[data-testid="stAppScrollToBottomContainer"]', '[data-testid="stMain"]', 'section.main', '.stMain']
     .forEach(q => d.querySelectorAll(q).forEach(e => e.scrollTop = 0));
   d.documentElement.scrollTop = 0; d.body.scrollTop = 0; window.parent.scrollTo(0, 0); }};
-go(); setTimeout(go, 80); setTimeout(go, 400);</script>""", height=0)
+go(); setTimeout(go, 80); setTimeout(go, 400);""")
 
 
 def scroll_to(key, n):
     """Bring the buy/SIP box into view after Buy or SIP is tapped."""
-    import streamlit.components.v1 as components
     with st.container(key="scrollto"):
-        components.html(f"""<script>/* {n} */
+        run_js(f"""/* {n} */
 setTimeout(() => {{ const e = window.parent.document.querySelector('.st-key-{key}');
-  if (e) e.scrollIntoView({{behavior: 'smooth', block: 'end'}}); }}, 250);</script>""", height=0)
+  if (e) e.scrollIntoView({{behavior: 'smooth', block: 'center'}}); }}, 250);""")
 
 
-def manager_links(names, amc):
-    """Each fund manager becomes a Google search link that opens in a new tab."""
+def manager_links(names, fund):
+    """Each fund manager opens a Google search in a new tab. The link passes through the app first so the tap is logged."""
+    ss = st.session_state
     out = []
     for n in [x.strip() for x in str(names).split(",") if x.strip()]:
-        q = urllib.parse.quote_plus(f'"{n}" {amc} fund manager')
-        out.append(f'<a class="mgr" href="https://www.google.com/search?q={q}" target="_blank" '
-                   f'rel="noopener">{esc(n)}</a>')
+        q = urllib.parse.urlencode({"go": "manager", "rid": ss.rid, "who": ss.get("name", ""), "m": n, "f": fund})
+        out.append(f'<a class="mgr" href="?{q}" target="_blank" rel="noopener">{esc(n)}</a>')
     return ", ".join(out) if out else "–"
+
+
+def page_redirect(qp):
+    """Opened in a new tab from a fund manager link: log the tap, then go to Google."""
+    m, fund = qp.get("m", ""), qp.get("f", "")
+    target = "https://www.google.com/search?" + urllib.parse.urlencode({"q": f'"{m}" fund manager {fund}'})
+    t = now()
+    writer()[0].put({"investor": None, "clicks": [{"rid": qp.get("rid", ""), "name": qp.get("who", ""), "time": t,
+                     "seconds_from_start": "", "screen": "fund page", "action": ACTIONS["manager_click"],
+                     "fund": fund, "detail": m, "code": "manager_click"}]})
+    st.markdown(f"Opening Google search for **{esc(m)}**…  \n[Tap here if nothing happens]({target})")
+    url = json.dumps(json.dumps(target)).replace("</", "<\\/")
+    run_js(f"""const s = window.parent.document.createElement('script');
+s.text = "window.location.replace(" + {url} + ")";
+window.parent.document.body.appendChild(s);""")
 
 
 def logo(amc, size=44):
@@ -244,10 +276,23 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
 .hold span {{color:#8a8a8a; font-size:13px;}}
 .hold .tot {{border-top:1px solid #f0f0f0; margin-top:6px; padding-top:8px !important;}}
 .hold .bar {{margin:4px 0 0;}}
-.st-key-actions {{margin-top:14px;}}
-.st-key-actions_open {{margin-top:14px; padding-bottom:10px;}}
+.st-key-actions {{margin:6px 0 14px;}}
+.st-key-actions button {{height:50px; border-radius:12px;}}
+.st-key-actions button p {{font-size:17px; font-weight:600;}}
+.st-key-actions button[kind="secondary"] {{border:1.5px solid {t['accent']}; color:{t['accent']}; background:#fff;}}
+.st-key-actions button[kind="secondary"]:disabled {{border-color:#ddd; color:#aaa;}}
+.st-key-complete_btn button {{height:48px; border-radius:12px; margin-top:-4px;}}
+.st-key-complete_btn button p {{font-weight:600; font-size:16px;}}
+.chg {{font-size:20px; font-weight:600; margin:6px 0 -6px;}}
+.chg span {{font-size:13px; font-weight:400; color:#8a8a8a;}}
+.thanks {{text-align:center; padding:12vh 8px 24px;}}
+.thanks .tick {{width:64px; height:64px; border-radius:50%; background:{t['accent']}; color:#fff; font-size:34px;
+  line-height:64px; margin:0 auto 18px;}}
+.thanks h2 {{font-size:26px; margin:0 0 8px;}}
+.thanks p {{color:#777;}}
+iframe[title="st_keyup.st_keyup"] {{margin-bottom:-6px;}}
 @media (max-width: 640px) {{
-  .block-container {{padding: 1.2rem 1rem 6.5rem !important;}}
+  .block-container {{padding: 1.2rem 1rem 3rem !important;}}
   .stats {{grid-template-columns:1fr 1fr;}}
   .stats.four {{grid-template-columns:1fr 1fr;}}
   .stats div {{padding:10px 12px; font-size:14px;}}
@@ -256,9 +301,6 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
   .fname {{font-size:16px;}}
   .fmeta {{font-size:13px; gap:10px;}}
   .gauge {{gap:14px;}}
-  /* Buy / SIP stay pinned to the bottom of the screen, like an app */
-  .st-key-actions {{position:fixed; left:0; right:0; bottom:0; z-index:999; background:#fff; margin:0;
-    padding:10px 16px calc(10px + env(safe-area-inset-bottom)); box-shadow:0 -4px 16px rgba(0,0,0,.08);}}
 }}
 </style>""", unsafe_allow_html=True)
 
@@ -292,58 +334,60 @@ def load_funds(path: str):
 
 @st.cache_data
 def load_nav(path: str):
-    """Optional sheet 'nav_history' with columns: scheme_code (or fund_name), date, nav."""
+    """nav_history.csv with columns fund_name, date, nav (one row per day)."""
     try:
-        nav = pd.read_excel(path, sheet_name="nav_history")
+        nav = pd.read_csv(path)
     except Exception:
         return None
-    nav.columns = [str(c).strip().lower().replace(" ", "_") for c in nav.columns]
-    if not {"date", "nav"} <= set(nav.columns):
-        return None
-    nav["date"] = pd.to_datetime(nav["date"], errors="coerce", dayfirst=True)
+    nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
     nav["nav"] = pd.to_numeric(nav["nav"], errors="coerce")
-    return nav.dropna(subset=["date", "nav"]).sort_values("date")
+    nav = nav.dropna(subset=["date", "nav"]).sort_values("date")
+    return {k: g[["date", "nav"]].reset_index(drop=True) for k, g in nav.groupby("fund_name")}
 
 
-PERIODS = {"3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60, "Max": None}
+def data_as_of():
+    nav = load_nav(str(NAV_FILE)) if NAV_FILE.exists() else None
+    if not nav:
+        return None
+    last = pd.Series([g["date"].iloc[-1] for g in nav.values()]).mode().iloc[0]
+    return f"{last:%d %b %Y}"
+
+
+PERIODS = {"1M": 1, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60, "All": None}
 
 
 def nav_chart(f):
-    nav = load_nav(str(DATA_FILE))
-    if nav is None:
-        return
-    if "scheme_code" in nav.columns and "scheme_code" in f and not pd.isna(f["scheme_code"]):
-        h = nav[nav["scheme_code"].astype(str) == str(f["scheme_code"]).split(".")[0]]
-    elif "fund_name" in nav.columns:
-        h = nav[nav["fund_name"] == f["fund_name"]]
-    else:
-        return
-    if len(h) < 2:
+    nav = load_nav(str(NAV_FILE)) if NAV_FILE.exists() else None
+    h = nav.get(f["fund_name"]) if nav else None
+    if h is None or len(h) < 2:
         return
     import altair as alt
-    key = "chart_period"
-    if key not in st.session_state:
-        st.session_state[key] = "3Y"
-    sel = st.session_state[key] or "3Y"
+    span = (h["date"].iloc[-1] - h["date"].iloc[0]).days / 30.4
+    options = [p for p, m in PERIODS.items() if m is None or m <= span + 0.5]
+    key = f"chart_{f['fund_name']}"
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = "3Y" if "3Y" in options else "All"
+    sel = st.session_state[key]
     months = PERIODS[sel]
-    view = h if months is None else h[h["date"] >= h["date"].max() - pd.DateOffset(months=months)]
-    t = APPS[st.session_state.app]
+    view = h if months is None else h[h["date"] >= h["date"].iloc[-1] - pd.DateOffset(months=months)]
     up = view["nav"].iloc[-1] >= view["nav"].iloc[0]
     colour = "#2E9E5B" if up else "#D64545"
     chg = (view["nav"].iloc[-1] / view["nav"].iloc[0] - 1) * 100
-    st.markdown(f'<div style="display:flex;align-items:baseline;gap:10px;margin-top:4px">'
-                f'<span style="font-size:13px;color:#8a8a8a">NAV as of {view["date"].iloc[-1]:%d %b %Y}</span>'
-                f'<b style="font-size:20px;color:{colour}">₹{view["nav"].iloc[-1]:,.2f}</b>'
-                f'<span style="font-size:13px;color:{colour}">{chg:+.2f}% ({sel})</span></div>',
+    label = "since launch" if sel == "All" else f"in {sel}"
+    st.markdown(f'<div class="chg" style="color:{colour}">{chg:+.2f}% <span>{label}</span></div>',
                 unsafe_allow_html=True)
+    lo, hi = view["nav"].min(), view["nav"].max()
+    pad = (hi - lo) * 0.08 or hi * 0.01
     base = alt.Chart(view).encode(
-        x=alt.X("date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8a8a8a", tickCount=6)),
-        y=alt.Y("nav:Q", title=None, scale=alt.Scale(domain=[view["nav"].min() * 0.95, view["nav"].max() * 1.03]), axis=alt.Axis(labelColor="#8a8a8a", gridColor="#f0f0f0")),
+        x=alt.X("date:T", title=None, axis=alt.Axis(grid=False, labelColor="#9a9a9a", tickCount=4, format="%b %y")),
+        y=alt.Y("nav:Q", title=None, scale=alt.Scale(domain=[lo - pad, hi + pad], zero=False),
+                axis=alt.Axis(labelColor="#9a9a9a", gridColor="#f2f2f2", tickCount=4)),
         tooltip=[alt.Tooltip("date:T", title="Date", format="%d %b %Y"), alt.Tooltip("nav:Q", title="NAV", format=",.2f")])
-    chart = (base.mark_area(color=colour, opacity=0.08, clip=True) + base.mark_line(color=colour, strokeWidth=2)).properties(height=230)
-    st.altair_chart(chart.configure_view(strokeWidth=0), width="stretch")
-    st.segmented_control("Period", list(PERIODS), key=key, label_visibility="collapsed",
-                         on_change=lambda: log("chart_period", f["fund_name"], st.session_state.get(key)))
+    chart = (base.mark_area(color=colour, opacity=0.08, clip=True) + base.mark_line(color=colour, strokeWidth=2))
+    st.altair_chart(chart.properties(height=210).configure_view(strokeWidth=0), width="stretch")
+    with st.container(key="periods"):
+        st.segmented_control("Period", options, key=key, label_visibility="collapsed",
+                             on_change=lambda: log("chart_period", f["fund_name"], st.session_state.get(key)))
 
 
 def init_state():
@@ -359,9 +403,34 @@ def init_state():
         ss.started_at = now()
 
 
+ACTIONS = {  # event code -> readable action name in the database and dashboard
+    "start": "Tapped Continue (started)", "start_invalid": "Tapped Continue (name or app missing)",
+    "list_order": "Fund list order shown", "tab": "Tapped tab", "search": "Searched",
+    "sort": "Changed sort", "filter_reset": "Tapped Reset filters", "open_fund": "Opened fund",
+    "close_fund": "Tapped Back", "chart_period": "Changed chart period", "choose_mode": "Tapped Buy/SIP button",
+    "buy": "Bought (lump sum)", "sip": "Started/added SIP", "buy_failed": "Buy/SIP not accepted",
+    "manager_click": "Tapped fund manager name", "complete_open": "Tapped Completed",
+    "complete_cancel": "Tapped Keep investing", "complete": "Confirmed and submitted",
+}
+
+
+def screen():
+    ss = st.session_state
+    if ss.get("step") == "start":
+        return "start"
+    if ss.get("step") == "done":
+        return "thank you"
+    return "fund page" if ss.get("view") else ("portfolio" if ss.get("tab") == "portfolio" else "fund list")
+
+
 def log(event, fund="", value=""):
-    st.session_state.events.append(
-        {"rid": st.session_state.rid, "ts": now(), "event": event, "fund": fund, "value": str(value)})
+    ss = st.session_state
+    label = ACTIONS.get(event, event.replace("filter_", "Changed filter: "))
+    secs = int((datetime.fromisoformat(now()) - datetime.fromisoformat(ss.started_at)).total_seconds())
+    ss.events.append({"rid": ss.rid, "name": ss.get("name", ""), "time": now(), "seconds_from_start": secs,
+                      "screen": screen(), "action": label, "fund": fund, "detail": str(value), "code": event})
+    if len(ss.events) - ss.get("events_saved", 0) >= FLUSH_EVERY and ss.get("step") == "invest":
+        flush()
 
 
 def committed(h):
@@ -374,30 +443,31 @@ def total_committed(exclude=None):
 
 def open_fund(fid, name, position):
     ss = st.session_state
+    log("open_fund", name, f"{ss.tab}:{position}")
     ss.view = fid
     ss.mode = None
     ss.nav_count = ss.get("nav_count", 0) + 1
-    log("open_fund", name, f"{ss.tab}:{position}")
 
 
 def set_tab(tab):
+    log("tab", value=tab)
     st.session_state.tab = tab
     st.session_state.view = None
     st.session_state.nav_count = st.session_state.get("nav_count", 0) + 1
-    log("tab", value=tab)
 
 
 def set_mode(mode, name):
+    log("choose_mode", name, mode)
     st.session_state.mode = mode
     st.session_state.mode_count = st.session_state.get("mode_count", 0) + 1
-    log("choose_mode", name, mode)
 
 
-def close_fund(name):
+def close_fund(name, tapped=True):
+    if tapped:
+        log("close_fund", name)
     st.session_state.view = None
     st.session_state.mode = None
     st.session_state.nav_count = st.session_state.get("nav_count", 0) + 1
-    log("close_fund", name)
 
 
 # ---------------------------------------------------------------- pages
@@ -413,12 +483,16 @@ def page_start():
                            index=None, placeholder="Select an app", key="in_app")
         if st.button("Continue", type="primary", width="stretch"):
             if not (name or "").strip() or not app:
+                log("start_invalid", value=f"name={'yes' if (name or '').strip() else 'no'}, app={app or 'none'}")
                 st.error("Please enter your name and choose an app.")
                 return
             ss = st.session_state
             ss.name, ss.app = name.strip(), app
+            for e in ss.events:          # earlier taps on this page were logged before the name was known
+                e["name"] = ss.name
             log("start", value=app)
             ss.step = "invest"
+            flush()
             st.rerun()
 
 
@@ -436,21 +510,53 @@ def wallet():
 <div><span>Starting amount</span><b>₹{inr(TOTAL)}</b></div>
 <div><span>Invested amount</span><b>₹{inr(invested)}</b></div>
 <div><span>Funds chosen</span><b>{n}</b></div></div></div>""", unsafe_allow_html=True)
+    st.button("Completed", key="complete_btn", type="primary", width="stretch", icon=":material/check_circle:",
+              on_click=lambda: (log("complete_open"), st.session_state.update(confirm=True)))
+
+
+@st.dialog("Submit your portfolio?")
+def confirm_dialog(df):
+    ss = st.session_state
+    held = [h for h in ss.alloc.values() if h]
+    invested = total_committed()
+    if held:
+        st.write(f"You've invested **₹{inr(invested)}** across **{len(held)} fund{'s' if len(held) > 1 else ''}**, "
+                 f"with **₹{inr(TOTAL - invested)}** left as cash.")
+    else:
+        st.write("You haven't invested in any fund yet. Your whole ₹1,00,000 will stay as cash.")
+    st.write("You won't be able to change it after this.")
+    c1, c2 = st.columns(2)
+    if c1.button("Keep investing", width="stretch"):
+        log("complete_cancel")
+        ss.confirm = False
+        st.rerun()
+    if c2.button("Submit", type="primary", width="stretch"):
+        log("complete", value=f"invested ₹{invested}")
+        ss.status, ss.completed_at, ss.step, ss.confirm = "completed", now(), "done", False
+        flush(portfolio=final_portfolio(df))
+        st.rerun()
+
+
+def page_thanks():
+    base_css(APPS[st.session_state.get("app") or "Other / I don't invest yet"])
+    st.markdown("""<div class="thanks"><div class="tick">✓</div>
+<h2>Thanks for being part of our survey</h2>
+<p>Your choices have been recorded. You can close this page now.</p></div>""", unsafe_allow_html=True)
+    form_url, id_field = secret("form_url"), secret("form_id_field")
+    if form_url:
+        rid = st.session_state.rid
+        link = f"{form_url}?usp=pp_url&{id_field}={rid}" if id_field else form_url
+        st.link_button("One last step: a 3-minute questionnaire", link, type="primary", width="stretch")
 
 
 def tabs():
-    ss = st.session_state
-    n = sum(1 for h in ss.alloc.values() if h)
-    form_url, id_field = secret("form_url"), secret("form_id_field")
+    n = sum(1 for h in st.session_state.alloc.values() if h)
     with st.container(key="tabs"):
-        cols = st.columns(3 if form_url else 2, gap="small")
-        cols[0].button("Mutual funds", key="nav_explore", icon=":material/work:", width="stretch",
-                       on_click=set_tab, args=("explore",))
-        cols[1].button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
-                       width="stretch", on_click=set_tab, args=("portfolio",))
-        if form_url:
-            link = f"{form_url}?usp=pp_url&{id_field}={ss.rid}" if id_field else form_url
-            cols[2].link_button("Questionnaire", link, icon=":material/assignment:", width="stretch")
+        c1, c2 = st.columns(2, gap="small")
+        c1.button("Mutual funds", key="nav_explore", icon=":material/work:", width="stretch",
+                  on_click=set_tab, args=("explore",))
+        c2.button(f"Portfolio ({n})" if n else "Portfolio", key="nav_portfolio", icon=":material/pie_chart:",
+                  width="stretch", on_click=set_tab, args=("portfolio",))
 
 
 def holding_text(h):
@@ -556,8 +662,13 @@ def page_explore(df):
     ss = st.session_state
     st.markdown('<p class="intro">Treat this as your own money. Tap any fund to see its details and invest. '
                 "Anything you don't invest stays as cash.</p>", unsafe_allow_html=True)
-    st.text_input("Search", key="q", placeholder="Search funds or fund houses", label_visibility="collapsed",
-                  on_change=lambda: log("search", value=st.session_state.q))
+    from st_keyup import st_keyup
+    q_now = st_keyup("Search", key="q", placeholder="Search funds or fund houses", label_visibility="collapsed",
+                     debounce=250)
+    if (q_now or "") != ss.get("q_logged", ""):
+        ss.q_logged = q_now or ""
+        if q_now:
+            log("search", value=q_now)
     view = df.set_index("fid").loc[ss.order].reset_index()
     view["position"] = range(1, len(view) + 1)
     view, active = apply_filters(view)
@@ -568,8 +679,8 @@ def page_explore(df):
             filter_panel(df)
         c2.selectbox("Sort", list(SORTS), key="srt", label_visibility="collapsed",
                      on_change=lambda: log("sort", value=st.session_state.srt))
-    if ss.q:
-        q = ss.q.lower()
+    if q_now:
+        q = q_now.lower().strip()
         view = view[view["fund_name"].str.lower().str.contains(q, regex=False)
                     | view["amc"].str.lower().str.contains(q, regex=False)]
     col, asc = SORTS[ss.srt]
@@ -579,6 +690,7 @@ def page_explore(df):
     chips = "".join(f'<span class="pill">{esc(x)}</span>' for x in active)
     st.markdown(f'<div class="chips">{chips}<span class="count">{len(view)} funds</span></div>',
                 unsafe_allow_html=True)
+    st.session_state.setdefault("srt", "Default")
     if view.empty:
         st.info("No funds match. Try another filter or search.")
     for _, f in view.iterrows():
@@ -651,46 +763,27 @@ def page_fund(df):
                 f'<div class="fmeta"><span>{esc(f["amc"])}</span><span>{esc(f["plan"])}</span>'
                 f'<span>{esc(f["category"])} · {esc(f["sub_category"])}</span></div></div></div>',
                 unsafe_allow_html=True)
-
-    if True:
-        nav_chart(f)
-        st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
+    nav_chart(f)
+    st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
 <div><span>3Y CAGR return</span><b>{pct(f['return_3y'])}</b></div>
 <div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
-        st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
-        since = "–" if pd.isna(f["launch_year"]) else esc(int(f["launch_year"]))
-        min_sip = "–" if pd.isna(f["min_sip"]) else f"₹{inr(f['min_sip'])}"
-        min_lump = "–" if not f["min_lumpsum"] else f"₹{inr(f['min_lumpsum'])}"
-        if not pd.isna(f["min_sip"]) and not f["min_sip"]:
-            min_sip = "–"
-        st.markdown(f"""<div class="stats">
-<div><span>NAV</span>₹{inr(f['nav'], 2)}</div>
-<div><span>Fund size (AUM)</span>{aum}</div>
-<div><span>Expense ratio</span>{pct(f['expense_ratio'], 2)}</div>
-<div><span>Min. lump sum</span>{min_lump}</div>
-<div><span>Min. SIP</span>{min_sip}</div>
-<div><span>Launched</span>{since}</div>
-<div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
-<div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{manager_links(f['fund_manager'], f['amc'])}</div>
-</div>""", unsafe_allow_html=True)
+    st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
 
-    if ss.mode:
-        scroll_to("actions_open", ss.get("mode_count", 0))
-    with st.container(key="actions_open" if ss.mode else "actions"):
+    # ---- Buy / SIP, placed right under the risk meter so it is on the first screen of a phone
+    with st.container(key="actions"):
         if h:
             st.markdown(f'<div class="inv" style="font-size:14px;margin-bottom:8px">You have: {holding_text(h)}</div>',
                         unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        c1.button("Buy", key="mode_buy", width="stretch",
-                  type="primary" if ss.mode == "buy" else "secondary", on_click=set_mode, args=("buy", name))
-        c2.button("SIP", key="mode_sip", width="stretch", disabled=not sip_ok,
+        c1, c2 = st.columns(2, gap="small")
+        c1.button("Buy", key="mode_buy", width="stretch", icon=":material/shopping_bag:",
+                  type="primary" if ss.mode != "sip" else "secondary", on_click=set_mode, args=("buy", name))
+        c2.button("SIP", key="mode_sip", width="stretch", disabled=not sip_ok, icon=":material/event_repeat:",
                   type="primary" if ss.mode == "sip" else "secondary", on_click=set_mode, args=("sip", name))
         if not sip_ok:
             st.caption("SIP is not available for this fund.")
-
         if ss.mode:
             sip = ss.mode == "sip"
-            with st.container(border=True):
+            with st.container(border=True, key="buybox"):
                 has = h.get(ss.mode, 0) if h else 0
                 if sip:
                     title = "Add to your monthly SIP" if has else "Start a monthly SIP"
@@ -699,97 +792,352 @@ def page_fund(df):
                 else:
                     title = "Buy more" if has else "One-time purchase"
                     st.markdown(f"**{title}**  \nYou can invest up to ₹{inr(room)} here.")
-                start = 0
                 with st.form(f"form_{fid}_{ss.mode}", border=False):
                     amt = st.number_input("Monthly amount (₹)" if sip else "Amount (₹)", min_value=0,
-                                          max_value=TOTAL, step=100 if sip else STEP, value=start)
+                                          max_value=TOTAL, step=100 if sip else STEP, value=0)
                     go = st.form_submit_button(("Add to SIP" if has else "Start SIP") if sip else "Buy now",
                                                width="stretch")
                 if go:
+                    amt = int(amt)
                     minimum = f["min_sip"] if sip else f["min_lumpsum"]
                     total = amt * (SIP_MONTHS if sip else 1)
+                    problem = None
                     if amt <= 0:
-                        st.error("Enter an amount.")
+                        problem = "Enter an amount."
                     elif total > room:
-                        st.error(f"That's ₹{inr(total)} in total, more than the ₹{inr(room)} you have left.")
-                    elif amt < minimum and not has:
-                        st.error(f"Minimum {'SIP' if sip else 'investment'} for this fund is ₹{inr(minimum)}.")
+                        problem = f"That's ₹{inr(total)} in total, more than the ₹{inr(room)} you have left."
+                    elif minimum and amt < minimum and not has:
+                        problem = f"Minimum {'SIP' if sip else 'investment'} for this fund is ₹{inr(minimum)}."
+                    if problem:
+                        log("buy_failed", name, f"{ss.mode} ₹{amt}: {problem}")
+                        st.error(problem)
                     else:
                         new = dict(h or {})
-                        new[ss.mode] = new.get(ss.mode, 0) + int(amt)
+                        new[ss.mode] = new.get(ss.mode, 0) + amt
                         ss.alloc[fid] = new
-                        log("buy" if not sip else "sip", name, int(amt))
-                        persist(df)
-                        close_fund(name)
+                        log("sip" if sip else "buy", name, amt)
+                        row = f.copy()
+                        row["fid"] = fid
+                        flush(purchases=[purchase_row(row, ss.mode, amt)])
+                        close_fund(name, tapped=False)
                         st.rerun()
+        if ss.mode and ss.get("mode_count"):
+            scroll_to("buybox", ss.mode_count)
+
+    since = "–" if pd.isna(f["launch_year"]) else esc(int(f["launch_year"]))
+    min_sip = "–" if pd.isna(f["min_sip"]) or not f["min_sip"] else f"₹{inr(f['min_sip'])}"
+    min_lump = "–" if not f["min_lumpsum"] else f"₹{inr(f['min_lumpsum'])}"
+    st.markdown(f"""<div class="stats">
+<div><span>NAV</span>₹{inr(f['nav'], 2)}</div>
+<div><span>Fund size (AUM)</span>{aum}</div>
+<div><span>Expense ratio</span>{pct(f['expense_ratio'], 2)}</div>
+<div><span>Min. lump sum</span>{min_lump}</div>
+<div><span>Min. SIP</span>{min_sip}</div>
+<div><span>Launched</span>{since}</div>
+<div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
+<div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{manager_links(f['fund_manager'], name)}</div>
+</div>""", unsafe_allow_html=True)
+    asof = data_as_of()
+    if asof:
+        st.markdown(f'<div class="note">Data as of {asof}</div>', unsafe_allow_html=True)
 
 
-def persist(df):
-    """Save a snapshot of the current portfolio plus any new events. Called after every portfolio change."""
-    ss = st.session_state
-    ss.snapshot = ss.get("snapshot", 0) + 1
-    ts = now()
-    pos = {fid: i + 1 for i, fid in enumerate(ss.order)}
-    allocs = []
-    for _, r in df.iterrows():
-        h = ss.alloc.get(r["fid"])
-        if h:
-            allocs.append({"rid": ss.rid, "snapshot": ss.snapshot, "fund_name": r["fund_name"], "amc": r["amc"],
-                           "category": r["category"], "sub_category": r["sub_category"], "risk": r["risk"],
-                           "lump_sum": h.get("buy", 0), "sip_monthly": h.get("sip", 0), "committed": committed(h),
-                           "share": round(committed(h) / TOTAL, 4), "list_position": pos[r["fid"]]})
-    invested = sum(a["committed"] for a in allocs)
-    duration = (datetime.fromisoformat(ts) - datetime.fromisoformat(ss.started_at)).total_seconds()
-    resp = {"rid": ss.rid, "snapshot": ss.snapshot, "name": ss.name, "app": ss.app,
-            "started_at": ss.started_at, "saved_at": ts, "seconds_taken": int(duration), "invested": invested,
-            "cash": TOTAL - invested, "n_funds": len(allocs),
-            "n_sips": sum(1 for a in allocs if a["sip_monthly"]),
-            "largest_share": max((a["share"] for a in allocs), default=0),
-            "funds_opened": len({e["fund"] for e in ss.events if e["event"] == "open_fund"})}
-    new_events = ss.events[ss.get("events_saved", 0):]
-    try:
-        save(resp, allocs, new_events)
-        ss.events_saved = len(ss.events)
-        ss.save_error = None
-    except Exception as e:  # never block the respondent because saving failed
-        ss.save_error = str(e)
+# ---------------------------------------------------------------- database
+TABLES = {
+    "investors": ["rid", "name", "app", "status", "started_at", "last_active", "completed_at", "minutes_taken",
+                  "invested", "cash", "n_funds", "n_sips", "capitalmind_amount", "funds_opened", "taps"],
+    "purchases": ["rid", "name", "time", "fund_name", "amc", "category", "sub_category", "type", "amount",
+                  "sip_monthly", "committed", "list_position"],
+    "portfolio": ["rid", "name", "submitted_at", "fund_name", "amc", "category", "sub_category", "risk",
+                  "lump_sum", "sip_monthly", "committed", "share", "list_position"],
+    "clicks": ["rid", "name", "time", "seconds_from_start", "screen", "action", "fund", "detail", "code"],
+}
 
 
-def save(resp, allocs, events):
-    if secret("gcp_service_account") and secret("sheet_id"):
+def use_sheets():
+    return bool(secret("gcp_service_account") and secret("sheet_id"))
+
+
+def _sheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    creds = Credentials.from_service_account_info(
+        dict(secret("gcp_service_account")), scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    return gspread.authorize(creds, http_client=gspread.http_client.BackoffHTTPClient).open_by_key(secret("sheet_id"))
+
+
+def _write(job, mem):
+    """Runs in the background writer. job = {"investor": {...}, "purchases": [...], "portfolio": [...], "clicks": [...]}"""
+    inv = job.get("investor")
+    if use_sheets():
         import gspread
-        from google.oauth2.service_account import Credentials
-        creds = Credentials.from_service_account_info(
-            dict(secret("gcp_service_account")), scopes=["https://www.googleapis.com/auth/spreadsheets"])
-        sh = gspread.authorize(creds).open_by_key(secret("sheet_id"))
+        if "sh" not in mem:
+            mem["sh"] = _sheet()
+        sh = mem["sh"]
 
-        def tab(name, header):
-            try:
-                w = sh.worksheet(name)
-            except gspread.WorksheetNotFound:
-                w = sh.add_worksheet(name, rows=2000, cols=len(header))
-            if not w.row_values(1):
-                w.append_row(header)
-            return w
+        def ws(name):
+            key = "ws_" + name
+            if key not in mem:
+                try:
+                    w = sh.worksheet(name)
+                except gspread.WorksheetNotFound:
+                    w = sh.add_worksheet(name, rows=1000, cols=len(TABLES[name]))
+                if not w.row_values(1):
+                    w.update(values=[TABLES[name]], range_name="A1")
+                mem[key] = w
+            return mem[key]
 
-        tab("responses", list(resp)).append_row([str(v) for v in resp.values()])
-        if allocs:
-            tab("allocations", list(allocs[0])).append_rows([[str(v) for v in a.values()] for a in allocs])
-        if events:
-            tab("events", list(events[0])).append_rows([[str(v) for v in e.values()] for e in events])
+        for name in ("purchases", "portfolio", "clicks"):
+            if job.get(name):
+                ws(name).append_rows([[str(r.get(c, "")) for c in TABLES[name]] for r in job[name]],
+                                     value_input_option="RAW")
+        if not inv:
+            return
+        w, rows = ws("investors"), mem.setdefault("rows", {})
+        values = [[str(inv.get(c, "")) for c in TABLES["investors"]]]
+        row = rows.get(inv["rid"])
+        if row is None:
+            cell = w.find(inv["rid"], in_column=1)
+            row = cell.row if cell else None
+        if row is None:
+            res = w.append_rows(values, value_input_option="RAW")
+            row = int(res["updates"]["updatedRange"].split("!")[1].split(":")[0].lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+        else:
+            w.update(values=values, range_name=f"A{row}", value_input_option="RAW")
+        rows[inv["rid"]] = row
     else:
         LOCAL_DIR.mkdir(exist_ok=True)
-        for name, rows in [("responses", [resp]), ("allocations", allocs), ("events", events)]:
-            if rows:
+        for name in ("purchases", "portfolio", "clicks"):
+            if job.get(name):
                 p = LOCAL_DIR / f"{name}.csv"
-                pd.DataFrame(rows).to_csv(p, mode="a", header=not p.exists(), index=False)
+                pd.DataFrame(job[name], columns=TABLES[name]).to_csv(p, mode="a", header=not p.exists(), index=False)
+        if not inv:
+            return
+        p = LOCAL_DIR / "investors.csv"
+        df = pd.read_csv(p, dtype=str) if p.exists() else pd.DataFrame(columns=TABLES["investors"])
+        df = df[df["rid"] != inv["rid"]]
+        df = pd.concat([df, pd.DataFrame([inv], columns=TABLES["investors"])])
+        df.to_csv(p, index=False)
+
+
+@st.cache_resource
+def writer():
+    """One background thread for the whole app: writes jobs in order and retries, so taps never wait on Google."""
+    q, mem = queue.Queue(), {}
+
+    def work():
+        while True:
+            job = q.get()
+            for attempt in range(6):
+                try:
+                    _write(job, mem)
+                    break
+                except Exception as e:
+                    mem.pop("sh", None)
+                    for k in [k for k in mem if k.startswith("ws_")]:
+                        mem.pop(k)
+                    mem["last_error"] = f"{datetime.now():%H:%M:%S} {e}"
+                    time.sleep(2 ** attempt)
+            q.task_done()
+
+    threading.Thread(target=work, daemon=True).start()
+    return q, mem
+
+
+def investor_row(status=None):
+    ss = st.session_state
+    held = {fid: h for fid, h in ss.alloc.items() if h}
+    invested = sum(committed(h) for h in held.values())
+    cm = sum(committed(h) for fid, h in held.items() if "capitalmind" in ss.get("amc_of", {}).get(fid, "").lower())
+    t = now()
+    return {"rid": ss.rid, "name": ss.get("name", ""), "app": ss.get("app", ""),
+            "status": status or ss.get("status", "in progress"), "started_at": ss.started_at, "last_active": t,
+            "completed_at": ss.get("completed_at", ""),
+            "minutes_taken": round((datetime.fromisoformat(t) - datetime.fromisoformat(ss.started_at)).total_seconds() / 60, 1),
+            "invested": invested, "cash": TOTAL - invested, "n_funds": len(held),
+            "n_sips": sum(1 for h in held.values() if h.get("sip")), "capitalmind_amount": cm,
+            "funds_opened": len({e["fund"] for e in ss.events if e["code"] == "open_fund"}),
+            "taps": sum(1 for e in ss.events if e["code"] != "list_order")}
+
+
+def flush(purchases=None, portfolio=None):
+    """Queue the investor row, new clicks and any purchase / final portfolio rows for the background writer."""
+    ss = st.session_state
+    new = ss.events[ss.get("events_saved", 0):]
+    ss.events_saved = len(ss.events)
+    writer()[0].put({"investor": investor_row(), "clicks": new, "purchases": purchases or [],
+                     "portfolio": portfolio or []})
+
+
+def purchase_row(f, kind, amt):
+    ss = st.session_state
+    return {"rid": ss.rid, "name": ss.name, "time": now(), "fund_name": f["fund_name"], "amc": f["amc"],
+            "category": f["category"], "sub_category": f["sub_category"],
+            "type": "SIP" if kind == "sip" else "Lump sum", "amount": amt * (SIP_MONTHS if kind == "sip" else 1),
+            "sip_monthly": amt if kind == "sip" else 0, "committed": amt * (SIP_MONTHS if kind == "sip" else 1),
+            "list_position": ss.order.index(f["fid"]) + 1}
+
+
+def final_portfolio(df):
+    ss = st.session_state
+    fx = df.set_index("fid")
+    rows = []
+    for fid, h in ss.alloc.items():
+        if not h:
+            continue
+        f = fx.loc[fid]
+        rows.append({"rid": ss.rid, "name": ss.name, "submitted_at": now(), "fund_name": f["fund_name"],
+                     "amc": f["amc"], "category": f["category"], "sub_category": f["sub_category"], "risk": f["risk"],
+                     "lump_sum": h.get("buy", 0), "sip_monthly": h.get("sip", 0), "committed": committed(h),
+                     "share": round(committed(h) / TOTAL, 4), "list_position": ss.order.index(fid) + 1})
+    return rows
+
+
+# ---------------------------------------------------------------- researcher dashboard
+@st.cache_data(ttl=60, show_spinner="Loading responses…")
+def read_tables(_stamp):
+    out = {}
+    if use_sheets():
+        sh = _sheet()
+        for name, cols in TABLES.items():
+            try:
+                rows = sh.worksheet(name).get_all_values()
+                out[name] = pd.DataFrame(rows[1:], columns=rows[0]) if rows else pd.DataFrame(columns=cols)
+            except Exception:
+                out[name] = pd.DataFrame(columns=cols)
+    else:
+        for name, cols in TABLES.items():
+            p = LOCAL_DIR / f"{name}.csv"
+            out[name] = pd.read_csv(p, dtype=str) if p.exists() else pd.DataFrame(columns=cols)
+    for name, df in out.items():
+        for c in ["invested", "cash", "n_funds", "n_sips", "capitalmind_amount", "funds_opened", "taps",
+                  "minutes_taken", "amount", "sip_monthly", "committed", "share", "list_position",
+                  "lump_sum", "seconds_from_start"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+    return out
+
+
+def page_admin(funds):
+    st.markdown("""<style>#MainMenu, footer, header[data-testid="stHeader"] {display:none !important;}
+.block-container {max-width: 1200px; padding-top: 2rem;}
+[data-testid="stMetric"] {background:#f7f7f8; border-radius:14px; padding:12px 16px;}</style>""",
+                unsafe_allow_html=True)
+    st.markdown("## Study dashboard")
+    pw = secret("admin_password")
+    if pw and not st.session_state.get("admin_ok"):
+        p = st.text_input("Password", type="password")
+        if p and p == pw:
+            st.session_state.admin_ok = True
+            st.rerun()
+        elif p:
+            st.error("Wrong password.")
+        st.stop()
+    if not pw and use_sheets():
+        st.warning("Add admin_password to Secrets before sharing the app link, or anyone can open this page.")
+
+    c_a, c_b = st.columns([1, 5], vertical_alignment="center")
+    if c_a.button("Refresh", icon=":material/refresh:"):
+        st.session_state.stamp = time.time()
+    c_b.caption(("Reading from Google Sheets" if use_sheets() else "Reading from local CSV files (Google Sheets not set up)")
+                + ". Updates every minute.")
+    t = read_tables(st.session_state.get("stamp", 0))
+    inv, pur, port, clk = t["investors"], t["purchases"], t["portfolio"], t["clicks"]
+    if inv.empty:
+        st.info("No responses yet.")
+        return
+    done = inv[inv["status"] == "completed"]
+    cm_names = set(funds.loc[funds["amc"].str.contains("Capitalmind", case=False), "fund_name"])
+
+    m = st.columns(5)
+    m[0].metric("Started", len(inv))
+    m[1].metric("Completed", f"{len(done)}  ({len(done) / len(inv):.0%})")
+    m[2].metric("Avg. invested", f"₹{inr(done['invested'].mean() if len(done) else 0)}")
+    m[3].metric("Avg. funds", f"{done['n_funds'].mean():.1f}" if len(done) else "–")
+    m[4].metric("Put money in Capitalmind", f"{(done['capitalmind_amount'] > 0).mean():.0%}" if len(done) else "–")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Investors", "One investor", "Funds", "Download"])
+    with tab1:
+        show = inv[["name", "app", "status", "invested", "cash", "n_funds", "n_sips", "capitalmind_amount",
+                    "funds_opened", "taps", "minutes_taken", "started_at", "rid"]].sort_values("started_at", ascending=False)
+        st.dataframe(show, hide_index=True, width="stretch", column_config={
+            "invested": st.column_config.NumberColumn("Invested ₹", format="%d"),
+            "cash": st.column_config.NumberColumn("Cash ₹", format="%d"),
+            "capitalmind_amount": st.column_config.NumberColumn("Capitalmind ₹", format="%d"),
+            "n_funds": "Funds", "n_sips": "SIPs", "funds_opened": "Funds opened", "taps": "Taps",
+            "minutes_taken": st.column_config.NumberColumn("Minutes", format="%.1f")})
+        st.caption("A row appears as soon as someone taps Continue. Status turns to completed when they submit.")
+    with tab2:
+        labels = {r.rid: f"{r['name']} · {r['status']} · started {r['started_at']}"
+                  for _, r in inv.sort_values("started_at", ascending=False).iterrows()}
+        rid = st.selectbox("Investor", list(labels), format_func=labels.get)
+        r = inv[inv["rid"] == rid].iloc[0]
+        k = st.columns(4)
+        k[0].metric("Invested", f"₹{inr(r['invested'])}")
+        k[1].metric("Funds", int(r["n_funds"]))
+        k[2].metric("Minutes", r["minutes_taken"])
+        k[3].metric("Taps", int(r["taps"]))
+        st.markdown("**Portfolio**" + (" (submitted)" if r["status"] == "completed" else " (from purchases so far)"))
+        p = port[port["rid"] == rid]
+        if p.empty:
+            p = pur[pur["rid"] == rid]
+            if not p.empty:
+                p = p.assign(lump_sum=p["amount"].where(p["type"] == "Lump sum", 0),
+                             sip=p["sip_monthly"]).groupby(["fund_name", "category", "sub_category"], as_index=False)[
+                    ["lump_sum", "sip", "committed"]].sum().rename(columns={"sip": "sip_monthly"})
+                p["share"] = p["committed"] / TOTAL
+        if p.empty:
+            st.caption("No purchases.")
+        else:
+            st.dataframe(p[["fund_name", "category", "sub_category", "lump_sum", "sip_monthly", "committed", "share"]]
+                         .sort_values("committed", ascending=False), hide_index=True, width="stretch",
+                         column_config={"share": st.column_config.ProgressColumn("Share", format="percent",
+                                                                                min_value=0, max_value=1)})
+        st.markdown("**Every tap, in order**")
+        c = clk[clk["rid"] == rid].copy()
+        c = c.sort_values("time")
+        st.dataframe(c[["seconds_from_start", "screen", "action", "fund", "detail"]], hide_index=True,
+                     width="stretch", column_config={"seconds_from_start": "Second"})
+    with tab3:
+        opened = clk[clk["code"] == "open_fund"].groupby("fund")["rid"].nunique().rename("people_opened")
+        src = port if not port.empty else pur
+        bought = src.groupby("fund_name").agg(people_bought=("rid", "nunique"), money=("committed", "sum"))
+        fx = funds[["fund_name", "amc", "sub_category", "aum_cr"]].set_index("fund_name")
+        tbl = fx.join(opened).join(bought).fillna({"people_opened": 0, "people_bought": 0, "money": 0})
+        tbl["opened_to_bought"] = (tbl["people_bought"] / tbl["people_opened"].where(tbl["people_opened"] > 0)).astype(float)
+        tbl["capitalmind"] = tbl.index.isin(cm_names)
+        st.dataframe(tbl.sort_values("money", ascending=False).reset_index(), hide_index=True, width="stretch",
+                     column_config={"money": st.column_config.NumberColumn("Money ₹", format="%d"),
+                                    "aum_cr": st.column_config.NumberColumn("AUM ₹ Cr", format="%d"),
+                                    "opened_to_bought": st.column_config.NumberColumn("Opened → bought",
+                                                                                      format="percent"),
+                                    "people_opened": "Opened by", "people_bought": "Bought by"})
+        st.caption(f"Based on {'submitted portfolios' if not port.empty else 'purchases so far'}. "
+                   "Opened → bought shows how often a look turned into money.")
+    with tab4:
+        for name, df in t.items():
+            st.download_button(f"Download {name}.csv", df.to_csv(index=False).encode(), f"{name}.csv",
+                               "text/csv", width="stretch")
+        err = writer()[1].get("last_error")
+        if err:
+            st.caption(f"Last write error (retried automatically): {err}")
 
 
 # ---------------------------------------------------------------- main
+qp = st.query_params
+if qp.get("go") == "manager":
+    page_redirect(qp)
+    st.stop()
+if "admin" in qp:
+    page_admin(load_funds(str(DATA_FILE))[0])
+    st.stop()
+
 init_state()
 ss = st.session_state
 if ss.step == "start":
     page_start()
+elif ss.step == "done":
+    page_thanks()
 else:
     if not DATA_FILE.exists():
         st.error("funds.xlsx not found next to app.py.")
@@ -806,6 +1154,9 @@ else:
             random.Random(ss.rid).shuffle(ids)
         ss.order = ids
         log("list_order", value=json.dumps([funds.set_index("fid").loc[i, "fund_name"] for i in ids]))
+    ss.amc_of = dict(zip(funds["fid"], funds["amc"]))
+    if ss.get("confirm"):
+        confirm_dialog(funds)
     if True:
         scroll_top()
         if ss.view:
