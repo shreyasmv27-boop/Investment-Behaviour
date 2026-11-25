@@ -882,7 +882,7 @@ def _sheet():
     from google.oauth2.service_account import Credentials
     creds = Credentials.from_service_account_info(
         dict(secret("gcp_service_account")), scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return gspread.authorize(creds, http_client=gspread.http_client.BackoffHTTPClient).open_by_key(secret("sheet_id"))
+    return gspread.authorize(creds, http_client=gspread.http_client.BackOffHTTPClient).open_by_key(secret("sheet_id"))
 
 
 def _write(job, mem):
