@@ -283,6 +283,10 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
 .st-key-actions button[kind="secondary"]:disabled {{border-color:#ddd; color:#aaa;}}
 .st-key-complete_btn button {{height:48px; border-radius:12px; margin-top:-4px;}}
 .st-key-complete_btn button p {{font-weight:600; font-size:16px;}}
+.sipcalc {{font-size:14px; color:#555; margin:-6px 0 10px;}}
+.sipcalc.over {{color:#C0392B;}}
+.st-key-go_btn button {{height:48px; border-radius:10px;}}
+.st-key-go_btn button p {{font-weight:600; font-size:16px;}}
 .chg {{font-size:20px; font-weight:600; margin:6px 0 -6px;}}
 .chg span {{font-size:13px; font-weight:400; color:#8a8a8a;}}
 .thanks {{text-align:center; padding:12vh 8px 24px;}}
@@ -409,7 +413,7 @@ ACTIONS = {  # event code -> readable action name in the database and dashboard
     "sort": "Changed sort", "filter_reset": "Tapped Reset filters", "open_fund": "Opened fund",
     "close_fund": "Tapped Back", "chart_period": "Changed chart period", "choose_mode": "Tapped Buy/SIP button",
     "buy": "Bought (lump sum)", "sip": "Started/added SIP", "buy_failed": "Buy/SIP not accepted",
-    "manager_click": "Tapped fund manager name", "complete_open": "Tapped Completed",
+    "manager_click": "Tapped fund manager name", "use_max": "Tapped Use maximum amount", "complete_open": "Tapped Completed",
     "complete_cancel": "Tapped Keep investing", "complete": "Confirmed and submitted",
 }
 
@@ -792,11 +796,19 @@ def page_fund(df):
                 else:
                     title = "Buy more" if has else "One-time purchase"
                     st.markdown(f"**{title}**  \nYou can invest up to ₹{inr(room)} here.")
-                with st.form(f"form_{fid}_{ss.mode}", border=False):
-                    amt = st.number_input("Monthly amount (₹)" if sip else "Amount (₹)", min_value=0,
-                                          max_value=TOTAL, step=100 if sip else STEP, value=0)
-                    go = st.form_submit_button(("Add to SIP" if has else "Start SIP") if sip else "Buy now",
-                                               width="stretch")
+                akey = f"amt_{fid}_{ss.mode}"
+                cap = room // SIP_MONTHS if sip else room
+                if ss.get("fill_max") == akey:          # "Use maximum" was tapped
+                    ss[akey] = int(cap)
+                    ss.fill_max = None
+                amt = st.number_input("Monthly SIP amount (₹)" if sip else "Amount (₹)", min_value=0,
+                                      max_value=TOTAL, step=100 if sip else STEP, key=akey)
+                if sip and amt:
+                    over = amt * SIP_MONTHS > room
+                    st.markdown(f'<div class="sipcalc{" over" if over else ""}">₹{inr(amt)}/month × {SIP_MONTHS} months = '
+                                f'<b>₹{inr(amt * SIP_MONTHS)}</b> total</div>', unsafe_allow_html=True)
+                go = st.button(("Add to SIP" if has else "Start SIP") if sip else "Buy now", key="go_btn",
+                               type="primary", width="stretch")
                 if go:
                     amt = int(amt)
                     minimum = f["min_sip"] if sip else f["min_lumpsum"]
@@ -804,13 +816,20 @@ def page_fund(df):
                     problem = None
                     if amt <= 0:
                         problem = "Enter an amount."
+                    elif total > room and sip:
+                        problem = (f"A ₹{inr(amt)} monthly SIP adds up to ₹{inr(total)} over {SIP_MONTHS} months, but you "
+                                   f"have ₹{inr(room)} left. The most you can put in a monthly SIP is ₹{inr(cap)}.")
                     elif total > room:
-                        problem = f"That's ₹{inr(total)} in total, more than the ₹{inr(room)} you have left."
+                        problem = f"You have ₹{inr(room)} left, so you can't invest ₹{inr(amt)}."
                     elif minimum and amt < minimum and not has:
                         problem = f"Minimum {'SIP' if sip else 'investment'} for this fund is ₹{inr(minimum)}."
                     if problem:
                         log("buy_failed", name, f"{ss.mode} ₹{amt}: {problem}")
                         st.error(problem)
+                        if total > room and cap > 0 and (has or not minimum or cap >= minimum):
+                            st.button(f"Use ₹{inr(cap)}{'/month' if sip else ''} instead", key="use_max",
+                                      on_click=lambda k=akey: (log("use_max", name, k),
+                                                               st.session_state.update(fill_max=k)))
                     else:
                         new = dict(h or {})
                         new[ss.mode] = new.get(ss.mode, 0) + amt
@@ -868,6 +887,9 @@ def _sheet():
 
 def _write(job, mem):
     """Runs in the background writer. job = {"investor": {...}, "purchases": [...], "portfolio": [...], "clicks": [...]}"""
+    if job.get("delete"):
+        _delete(job["delete"], mem)
+        return
     inv = job.get("investor")
     if use_sheets():
         import gspread
@@ -918,6 +940,33 @@ def _write(job, mem):
         df = df[df["rid"] != inv["rid"]]
         df = pd.concat([df, pd.DataFrame([inv], columns=TABLES["investors"])])
         df.to_csv(p, index=False)
+
+
+def _delete(rids, mem):
+    """Remove every row belonging to these respondents from all tables."""
+    rids = set(rids)
+    if use_sheets():
+        import gspread
+        if "sh" not in mem:
+            mem["sh"] = _sheet()
+        for name, cols in TABLES.items():
+            try:
+                w = mem["sh"].worksheet(name)
+            except gspread.WorksheetNotFound:
+                continue
+            rows = w.get_all_values()
+            keep = [r for r in rows[1:] if r and r[0] not in rids]
+            if len(keep) == len(rows) - 1:
+                continue
+            w.clear()
+            w.update(values=[rows[0]] + keep, range_name="A1", value_input_option="RAW")
+        mem["rows"] = {}            # row numbers have shifted
+    else:
+        for name in TABLES:
+            p = LOCAL_DIR / f"{name}.csv"
+            if p.exists():
+                df = pd.read_csv(p, dtype=str)
+                df[~df["rid"].isin(rids)].to_csv(p, index=False)
 
 
 @st.cache_resource
@@ -1067,6 +1116,20 @@ def page_admin(funds):
             "n_funds": "Funds", "n_sips": "SIPs", "funds_opened": "Funds opened", "taps": "Taps",
             "minutes_taken": st.column_config.NumberColumn("Minutes", format="%.1f")})
         st.caption("A row appears as soon as someone taps Continue. Status turns to completed when they submit.")
+        with st.expander("Delete test or dummy entries"):
+            labels = {r.rid: f"{r['name']} · {r['app']} · {r['status']} · started {r['started_at']}"
+                      for _, r in inv.sort_values("started_at", ascending=False).iterrows()}
+            pick = st.multiselect("Choose entries to delete", list(labels), format_func=labels.get)
+            if pick:
+                st.warning(f"This removes {len(pick)} entr{'y' if len(pick) == 1 else 'ies'} and all their purchases "
+                           "and taps from every table. It can't be undone.")
+                if st.button(f"Delete {len(pick)} entr{'y' if len(pick) == 1 else 'ies'}", type="primary"):
+                    q = writer()[0]
+                    q.put({"delete": pick})
+                    q.join()                                  # wait until it's done before reloading
+                    st.session_state.stamp = time.time()
+                    st.toast("Deleted.")
+                    st.rerun()
     with tab2:
         labels = {r.rid: f"{r['name']} · {r['status']} · started {r['started_at']}"
                   for _, r in inv.sort_values("started_at", ascending=False).iterrows()}
