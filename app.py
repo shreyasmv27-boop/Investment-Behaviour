@@ -42,7 +42,7 @@ QUESTIONS = [
     {"id": "experience", "type": "single", "text": "How long have you been investing in mutual funds?",
      "options": ["Less than 2 years", "2 to 6 years", "More than 6 years"]},
     {"id": "quiz_turnover", "type": "single",
-     "text": "A mutual fund shows a portfolio turnover of 100%. What does that mean?",
+     "text": "A mutual fund shows a portfolio turnover of 100% in a year. What does that mean?",
      "options": ["The fund's value doubled in a year", "The fund replaced roughly all its holdings over the year",
                  "The fund charges 100% in fees", "I'm not sure"],
      "correct": "The fund replaced roughly all its holdings over the year"},
@@ -55,10 +55,9 @@ QUESTIONS = [
      "options": ["AMC brand", "CAGR return (1Y/3Y/5Y)", "Expense ratio", "Exit load", "Fund manager", "Fund size",
                  "Sector allocation", "Portfolio allocation", "Fund age"]},
     {"id": "new_vs_established", "type": "single",
-     "text": "Let's say a new fund has given a 10% CAGR over the last 3 years and has an AUM of ₹500 crore, while a "
-             "well-established fund with an AUM of ₹10,000 crore has given an 8% CAGR over the same period. Assuming "
-             "the exit load and expense ratio are the same for both, which one would you choose?",
-     "options": ["The new fund", "The well-established fund"]},
+     "text": "A new, small fund has given slightly better returns than a large, well-known fund. "
+             "Costs are the same. Which would you pick?",
+     "options": ["The new, small fund", "The large, well-known fund"]},
     {"id": "global_view", "type": "single",
      "text": "For long-term investing, how do you feel about putting some money into US or global markets, "
              "through funds that invest abroad?",
@@ -70,16 +69,6 @@ QUESTIONS = [
 ]
 
 
-def answer_columns():
-    cols = []
-    for q in QUESTIONS:
-        if q["type"] == "top_bottom":
-            cols += [f"{q['id']}_top", f"{q['id']}_bottom"]
-        else:
-            cols.append(q["id"])
-        if q.get("correct"):
-            cols.append(f"{q['id']}_correct")
-    return cols
 FLUSH_EVERY = 6              # send clicks to the database after this many taps (plus at every purchase / completion)
 LOCAL_DIR = Path(__file__).parent / "responses"
 
@@ -333,8 +322,8 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
 .st-key-actions button[kind="secondary"]:disabled {{border-color:#ddd; color:#aaa;}}
 .st-key-complete_btn button {{height:48px; border-radius:12px; margin-top:-4px;}}
 .st-key-complete_btn button p {{font-weight:600; font-size:16px;}}
-.st-key-holdbox {{margin-top:16px;}}
-.hcard {{border:1px solid #eee; border-radius:14px; padding:12px 16px 4px; margin-top:-4px;}}
+.htitle {{font-size:17px; font-weight:600; color:#222; margin:22px 0 8px;}}
+.hcard {{border:1px solid #eee; border-radius:14px; padding:12px 16px 4px;}}
 .hb-t {{display:flex; justify-content:space-between; gap:12px; font-size:14px; color:#222;}}
 .hb-t small {{display:block; color:#8a8a8a; font-size:12px;}}
 .hb .bar {{height:6px; margin:4px 0 10px;}}
@@ -441,13 +430,7 @@ def holdings_section(f):
     name = f["fund_name"]
     if name not in hold and name not in sect:
         return
-    key = f"hv_{f.name}"
-    with st.container(key="holdbox"):
-        st.segmented_control("Holdings", ["Sector allocation", "Top 5 holdings"], key=key,
-                             label_visibility="collapsed",
-                             on_change=lambda: log("holdings_view", name, st.session_state.get(key) or "closed"))
-    pick = st.session_state.get(key)
-    if pick == "Sector allocation" and name in sect:
+    if name in sect:
         g = sect[name]
         html = ""
         classes = [a for a in dict.fromkeys(g["asset_class"]) if a]
@@ -457,10 +440,11 @@ def holdings_section(f):
                 html += f'<div class="hsub">Within the {esc(a.lower())} part of the fund</div>' + bars(part, "sector")
         else:
             html = bars(g.sort_values("weight", ascending=False), "sector")
-        st.markdown(f'<div class="hcard">{html}</div>', unsafe_allow_html=True)
-    elif pick == "Top 5 holdings" and name in hold:
-        st.markdown(f'<div class="hcard">{bars(hold[name], "holding", "instrument")}</div>',
+        st.markdown(f'<div class="htitle">Sector allocation</div><div class="hcard">{html}</div>',
                     unsafe_allow_html=True)
+    if name in hold:
+        st.markdown(f'<div class="htitle">Top 5 holdings</div>'
+                    f'<div class="hcard">{bars(hold[name], "holding", "instrument")}</div>', unsafe_allow_html=True)
 
 
 def data_as_of():
@@ -529,7 +513,7 @@ ACTIONS = {  # event code -> readable action name in the database and dashboard
     "buy": "Bought (lump sum)", "sip": "Started/added SIP", "buy_failed": "Buy/SIP not accepted",
     "manager_click": "Tapped fund manager name", "use_max": "Tapped Use maximum amount", "complete_open": "Tapped Completed",
     "complete_cancel": "Tapped Keep investing", "complete": "Submitted portfolio",
-    "holdings_view": "Opened holdings section", "survey_incomplete": "Tapped Done (questions unanswered)",
+"survey_incomplete": "Tapped Done (questions unanswered)",
     "survey_done": "Tapped Done (survey completed)",
 }
 
@@ -657,14 +641,19 @@ except where you're asked to pick the correct meaning.</p></div>""", unsafe_allo
                 if q.get("only") and q["only"] in (ss.get(k) or []) and len(ss.get(k)) > 1:
                     st.caption(f"“{q['only']}” can't be combined with other answers.")
             else:
-                st.markdown(f'<div class="qsub">Pick the <b>{q["top"]} that matter most</b></div>',
+                st.markdown(f'<div class="qsub">Pick the <b>{q["top"]} that matter most</b> '
+                            f'({len(ss.get(k + "_top") or [])}/{q["top"]} picked)</div>',
                             unsafe_allow_html=True)
                 top = st.pills("Most", q["options"], selection_mode="multi", key=k + "_top",
-                               label_visibility="collapsed")
-                st.markdown(f'<div class="qsub">Pick the <b>{q["bottom"]} that matter least</b></div>',
+                               label_visibility="collapsed", on_change=limit_picks, args=(k + "_top", q["top"]))
+                st.markdown(f'<div class="qsub">Pick the <b>{q["bottom"]} that matter least</b> '
+                            f'({len(ss.get(k + "_bottom") or [])}/{q["bottom"]} picked)</div>',
                             unsafe_allow_html=True)
+                if ss.get(k + "_bottom"):          # drop anything that has since been picked as "most"
+                    ss[k + "_bottom"] = [o for o in ss[k + "_bottom"] if o not in (top or [])]
                 st.pills("Least", [o for o in q["options"] if o not in (top or [])], selection_mode="multi",
-                         key=k + "_bottom", label_visibility="collapsed")
+                         key=k + "_bottom", label_visibility="collapsed",
+                         on_change=limit_picks, args=(k + "_bottom", q["bottom"]))
     if st.button("Done", type="primary", width="stretch", key="survey_done_btn", icon=":material/task_alt:"):
         problems, row = check_answers()
         if problems:
@@ -673,40 +662,50 @@ except where you're asked to pick the correct meaning.</p></div>""", unsafe_allo
             st.rerun()
         log("survey_done")
         ss.status, ss.completed_at, ss.step = "completed", now(), "done"
-        flush(answers=[row])
+        flush(answers=row)
         st.rerun()
     if missing:
         st.error(f"Please answer {len(missing)} more question{'s' if len(missing) > 1 else ''} (marked in red).")
 
 
-def check_answers():
-    """Returns (ids of unanswered or invalid questions, answers row for the database)."""
+def limit_picks(key, n):
+    """Keep a chip question to at most n picks: an extra tap is undone."""
     ss = st.session_state
-    problems = []
-    row = {"rid": ss.rid, "name": ss.name, "app": ss.app, "submitted_at": now(),
-           "seconds_on_questions": int((datetime.fromisoformat(now()) -
-                                        datetime.fromisoformat(ss.get("survey_started", now()))).total_seconds())}
-    for q in QUESTIONS:
+    v = ss.get(key) or []
+    if len(v) > n:
+        ss[key] = ss.get(key + "_prev", v[:n])
+        st.toast(f"You can pick only {n}. Unselect one first to change your choice.")
+    ss[key + "_prev"] = list(ss.get(key) or [])
+
+
+def check_answers():
+    """Returns (ids of unanswered or invalid questions, answer rows for the database: one row per question)."""
+    ss = st.session_state
+    problems, rows, t = [], [], now()
+    base = {"rid": ss.rid, "name": ss.name, "app": ss.app, "submitted_at": t}
+    for i, q in enumerate(QUESTIONS, 1):
         k = f"ans_{q['id']}"
         if q["type"] == "single":
             v = ss.get(k)
             if not v:
                 problems.append(q["id"])
-            row[q["id"]] = v or ""
+            rows.append({**base, "question_no": i, "question": q["text"], "answer": v or "",
+                         "correct": ("yes" if v == q["correct"] else "no") if q.get("correct") else ""})
         elif q["type"] == "multi":
             v = ss.get(k) or []
             if not v or (q.get("only") in v and len(v) > 1):
                 problems.append(q["id"])
-            row[q["id"]] = " | ".join(v)
+            rows.append({**base, "question_no": i, "question": q["text"], "answer": " | ".join(v), "correct": ""})
         else:
-            top, bottom = ss.get(k + "_top") or [], ss.get(k + "_bottom") or []
-            bottom = [b for b in bottom if b not in top]
+            top = ss.get(k + "_top") or []
+            bottom = [b for b in (ss.get(k + "_bottom") or []) if b not in top]
             if len(top) != q["top"] or len(bottom) != q["bottom"]:
                 problems.append(q["id"])
-            row[f"{q['id']}_top"], row[f"{q['id']}_bottom"] = " | ".join(top), " | ".join(bottom)
-        if q.get("correct"):
-            row[f"{q['id']}_correct"] = "yes" if row.get(q["id"]) == q["correct"] else "no"
-    return problems, row
+            rows.append({**base, "question_no": f"{i}a", "question": f"{q['text']} ({q['top']} that matter most)",
+                         "answer": " | ".join(top), "correct": ""})
+            rows.append({**base, "question_no": f"{i}b", "question": f"{q['text']} ({q['bottom']} that matter least)",
+                         "answer": " | ".join(bottom), "correct": ""})
+    return problems, rows
 
 
 @st.dialog("Submit your portfolio?")
@@ -1064,7 +1063,7 @@ TABLES = {
     "portfolio": ["rid", "name", "submitted_at", "fund_name", "amc", "category", "sub_category", "risk",
                   "lump_sum", "sip_monthly", "committed", "share", "list_position"],
     "clicks": ["rid", "name", "time", "seconds_from_start", "screen", "action", "fund", "detail", "code"],
-    "answers": ["rid", "name", "app", "submitted_at", "seconds_on_questions"] + answer_columns(),
+    "answers": ["rid", "name", "app", "submitted_at", "question_no", "question", "answer", "correct"],
 }
 
 
@@ -1100,7 +1099,11 @@ def _write(job, mem):
                 except gspread.WorksheetNotFound:
                     w = sh.add_worksheet(name, rows=1000, cols=len(TABLES[name]))
                 head = w.row_values(1)
-                if head != TABLES[name] and head == TABLES[name][:len(head)]:   # empty, or new questions added
+                if head and head != TABLES[name][:len(head)]:       # old layout: keep it, start a new tab
+                    w.update_title(f"{name}_old_{datetime.now(IST):%d%b_%H%M}")
+                    w = sh.add_worksheet(name, rows=1000, cols=len(TABLES[name]))
+                    head = []
+                if head != TABLES[name]:
                     if w.col_count < len(TABLES[name]):
                         w.add_cols(len(TABLES[name]) - w.col_count)
                     w.update(values=[TABLES[name]], range_name="A1")
@@ -1365,18 +1368,9 @@ def page_admin(funds):
         if a.empty:
             st.caption("No answers yet.")
         else:
-            a = a.iloc[-1]
-            qa = []
-            for q in QUESTIONS:
-                if q["type"] == "top_bottom":
-                    qa.append((q["text"] + " (most)", a.get(f"{q['id']}_top", "")))
-                    qa.append((q["text"] + " (least)", a.get(f"{q['id']}_bottom", "")))
-                else:
-                    v = a.get(q["id"], "")
-                    if q.get("correct"):
-                        v = f"{v}  ({'correct' if a.get(q['id'] + '_correct') == 'yes' else 'wrong'})"
-                    qa.append((q["text"], v))
-            st.dataframe(pd.DataFrame(qa, columns=["Question", "Answer"]), hide_index=True, width="stretch")
+            a = a[a["submitted_at"] == a["submitted_at"].max()]
+            st.dataframe(a[["question_no", "question", "answer", "correct"]], hide_index=True, width="stretch",
+                         column_config={"question_no": "No."})
         st.markdown("**Every tap, in order**")
         c = clk[clk["rid"] == rid].copy()
         c = c.sort_values("time")
@@ -1402,25 +1396,22 @@ def page_admin(funds):
         if ans.empty:
             st.info("No one has finished the questions yet.")
         else:
-            st.caption(f"{len(ans)} people answered. Counts include everyone who tapped Done.")
-            for i, q in enumerate(QUESTIONS, 1):
-                st.markdown(f"**{i}. {q['text']}**")
+            st.caption(f"{ans['rid'].nunique()} people answered.")
+            opts = {}
+            for q in QUESTIONS:
+                opts[q["text"]] = q["options"]
                 if q["type"] == "top_bottom":
-                    c1, c2 = st.columns(2)
-                    for col, part, lab in ((c1, "top", "Picked as most important"),
-                                           (c2, "bottom", "Picked as least important")):
-                        v = ans[f"{q['id']}_{part}"].fillna("").str.split(" \\| ").explode()
-                        v = v[v != ""].value_counts().reindex(q["options"], fill_value=0)
-                        col.caption(lab)
-                        col.bar_chart(v, horizontal=True, height=260)
-                else:
-                    v = ans[q["id"]].fillna("")
-                    if q["type"] == "multi":
-                        v = v.str.split(" \\| ").explode()
-                    v = v[v != ""].value_counts().reindex(q["options"], fill_value=0)
-                    st.bar_chart(v, horizontal=True, height=40 + 36 * len(q["options"]))
-                    if q.get("correct"):
-                        st.caption(f"Answered correctly: {(ans[q['id'] + '_correct'] == 'yes').mean():.0%}")
+                    opts[f"{q['text']} ({q['top']} that matter most)"] = q["options"]
+                    opts[f"{q['text']} ({q['bottom']} that matter least)"] = q["options"]
+            for (no, qt), g in ans.groupby(["question_no", "question"], sort=False):
+                st.markdown(f"**{no}. {qt}**")
+                v = g["answer"].fillna("").str.split(" \\| ").explode()
+                v = v[v != ""].value_counts()
+                if qt in opts:
+                    v = v.reindex(opts[qt], fill_value=0)
+                st.bar_chart(v, horizontal=True, height=40 + 36 * max(len(v), 1))
+                if g["correct"].isin(["yes", "no"]).any():
+                    st.caption(f"Answered correctly: {(g['correct'] == 'yes').mean():.0%}")
             with st.expander("All answers as a table"):
                 st.dataframe(ans, hide_index=True, width="stretch")
     with tab4:
