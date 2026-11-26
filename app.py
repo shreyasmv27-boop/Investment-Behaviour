@@ -35,18 +35,16 @@ HOLDINGS_FILE = Path(__file__).parent / "holdings.xlsx"
 # ---- Questionnaire shown after "Completed". Every question is mandatory.
 # To add a question, add a dict here. "id" becomes the column name in the Google Sheet (keep ids unique and
 # add new questions at the end, so existing columns don't shift).
-#   type "single": pick one option        type "multi": pick one or more ("only" = option that can't be combined)
+#   type "single": pick one option        type "multi": pick one or more ("only" = can't be combined, "max" = most picks)
 #   type "top_bottom": pick exactly `top` best and `bottom` worst from the same list
 #   "correct": for quiz questions, the right option (saved as a separate *_correct column)
 QUESTIONS = [
-    {"id": "age", "type": "single", "text": "What is your age range?",
-     "options": ["Under 30 years", "30 to 50 years", "Over 50 years"]},
     {"id": "experience", "type": "single", "text": "How long have you been investing in mutual funds?",
      "options": ["Less than 2 years", "2 to 6 years", "More than 6 years"]},
     {"id": "quiz_turnover", "type": "single",
      "text": "A mutual fund shows a portfolio turnover of 100% in a year. What does that mean?",
      "options": ["The fund's value doubled in a year", "The fund replaced roughly all its holdings over the year",
-                 "The fund charges 100% in fees", "I'm not sure"],
+                 "100% investment in that year, no cash left", "I'm not sure"],
      "correct": "The fund replaced roughly all its holdings over the year"},
     {"id": "heard_from", "type": "single", "text": "Where did you last hear about a fund you bought?",
      "options": ["Instagram", "YouTube", "Friend or advisor", "Newspaper"]},
@@ -57,9 +55,19 @@ QUESTIONS = [
      "options": ["AMC brand", "CAGR return (1Y/3Y/5Y)", "Expense ratio", "Exit load", "Fund manager", "Fund size",
                  "Sector allocation", "Portfolio allocation", "Fund age"]},
     {"id": "new_vs_established", "type": "single",
-     "text": "A new, small fund has given slightly better returns than a large, well-known fund. "
-             "Costs are the same. Which would you pick?",
-     "options": ["The new, small fund", "The large, well-known fund"]},
+     "text": "Which would you choose: a new fund (₹400 Cr AUM, 10% 3Y CAGR) or an established fund "
+             "(₹10,000 Cr AUM, 8% 3Y CAGR)?",
+     "options": ["New fund", "Established fund"]},
+    {"id": "visible_manager", "type": "single",
+     "text": "Two fund managers have the same 5-year returns. Manager A is often on TV and social media explaining "
+             "the market. Manager B rarely speaks in public. Which would you invest with?",
+     "options": ["Manager A, the visible one", "Manager B, the quiet one", "Indifferent"]},
+    {"id": "new_fund_growth", "type": "multi", "max": 3,
+     "text": "Imagine a new fund with almost no advertising. In your view, what is most likely to help it grow? "
+             "Pick up to 3.",
+     "options": ["Word of mouth", "Better returns than others", "Lower costs", "A clear investment philosophy",
+                 "Advisors and distributors recommending it", "The manager's public credibility",
+                 "Doing well in a market fall"]},
     {"id": "global_view", "type": "single",
      "text": "For long-term investing, how do you feel about putting some money into US or global markets, "
              "through funds that invest abroad?",
@@ -70,6 +78,9 @@ QUESTIONS = [
                  "Costs (expense ratio or exit load)", "Its sector fell out of favour", "No, never"]},
 ]
 
+
+AGES = ["Under 30 years", "30 to 50 years", "Above 50 years"]
+CITIES = ["Bengaluru", "Delhi", "Mumbai", "Gurgaon", "Chennai", "Other"]
 
 FLUSH_EVERY = 6              # send clicks to the database after this many taps (plus at every purchase / completion)
 LOCAL_DIR = Path(__file__).parent / "responses"
@@ -156,11 +167,20 @@ def scroll_top():
     n = st.session_state.get("nav_count", 0)
     with st.container(key="scrolltop"):
         run_js(f"""/* {n} */
-const go = () => {{ const d = window.parent.document;
-  ['[data-testid="stAppScrollToBottomContainer"]', '[data-testid="stMain"]', 'section.main', '.stMain']
-    .forEach(q => d.querySelectorAll(q).forEach(e => e.scrollTop = 0));
-  d.documentElement.scrollTop = 0; d.body.scrollTop = 0; window.parent.scrollTo(0, 0); }};
-go(); setTimeout(go, 80); setTimeout(go, 400);""")
+const w = window.parent, d = w.document;
+const go = () => {{
+  ['[data-testid="stAppScrollToBottomContainer"]', '[data-testid="stMain"]', '[data-testid="stAppViewContainer"]',
+   'section.main', '.stMain', '.main']
+    .forEach(q => d.querySelectorAll(q).forEach(e => {{ if (e.scrollTop) e.scrollTop = 0; }}));
+  if (d.scrollingElement) d.scrollingElement.scrollTop = 0;
+  d.documentElement.scrollTop = 0; d.body.scrollTop = 0; w.scrollTo(0, 0); }};
+/* Keep pinning to the top while the page (chart, holdings) finishes drawing on slow phones,
+   but stop the moment the person touches or scrolls. */
+let stop = false;
+const quit = () => {{ stop = true; }};
+['touchstart', 'wheel', 'keydown'].forEach(t => w.addEventListener(t, quit, {{once: true, passive: true}}));
+go();
+[50, 150, 300, 500, 800, 1200, 1700, 2300].forEach(ms => setTimeout(() => {{ if (!stop) go(); }}, ms));""")
 
 
 def scroll_to(key, n):
@@ -283,6 +303,11 @@ def base_css(t):
 [data-testid="stVerticalBlockBorderWrapper"] {{border-radius:14px;}}
 .block-container {{max-width: 820px;}}
 .st-key-scrolltop, .st-key-scrollto {{position:absolute; height:0; overflow:hidden;}}
+[data-testid="stLayoutWrapper"]:has(> .st-key-backbar), .st-key-backbar {{position:-webkit-sticky; position:sticky;
+  top:0; z-index:1000; background:#fff;}}
+.st-key-backbar {{padding:8px 0; box-shadow:0 6px 8px -8px rgba(0,0,0,.25);}}
+.st-key-back_btn button {{min-height:42px; border-radius:999px; padding:0 16px;}}
+.st-key-back_btn button p {{font-size:15px; font-weight:600;}}
 /* keep chosen rows side by side on phones (Streamlit stacks columns below 640px) */
 .st-key-tabs [data-testid="stHorizontalBlock"], .st-key-tools [data-testid="stHorizontalBlock"],
 [class*="st-key-row_"] [data-testid="stHorizontalBlock"], [class*="st-key-prow_"] [data-testid="stHorizontalBlock"],
@@ -595,15 +620,22 @@ def page_start():
         st.write("A short investing exercise for a GIM research study. It takes about 5 minutes. "
                  "No real money is involved and nothing is bought.")
         name = st.text_input("Your name", key="in_name", placeholder="First name is fine")
+        age = st.selectbox("Your age", AGES, index=None, placeholder="Select your age range", key="in_age")
+        city = st.selectbox("Your location", CITIES, index=None, placeholder="Select your city", key="in_city")
+        other = ""
+        if city == "Other":
+            other = st.text_input("Your city", key="in_city_other", placeholder="Type your city")
         app = st.selectbox("Which app do you mainly use to invest in mutual funds?", list(APPS.keys()),
                            index=None, placeholder="Select an app", key="in_app")
         if st.button("Continue", type="primary", width="stretch"):
-            if not (name or "").strip() or not app:
-                log("start_invalid", value=f"name={'yes' if (name or '').strip() else 'no'}, app={app or 'none'}")
-                st.error("Please enter your name and choose an app.")
+            location = (other or "").strip() if city == "Other" else city
+            if not (name or "").strip() or not age or not location or not app:
+                log("start_invalid", value=f"name={'yes' if (name or '').strip() else 'no'}, age={age or 'none'}, "
+                                           f"location={location or 'none'}, app={app or 'none'}")
+                st.error("Please fill in your name, age, location and app.")
                 return
             ss = st.session_state
-            ss.name, ss.app = name.strip(), app
+            ss.name, ss.app, ss.age, ss.location = name.strip(), app, age, location
             for e in ss.events:          # earlier taps on this page were logged before the name was known
                 e["name"] = ss.name
             log("start", value=app)
@@ -647,7 +679,11 @@ except where you're asked to pick the correct meaning.</p></div>""", unsafe_allo
             if q["type"] == "single":
                 st.radio(q["text"], q["options"], index=None, key=k, label_visibility="collapsed")
             elif q["type"] == "multi":
-                st.pills(q["text"], q["options"], selection_mode="multi", key=k, label_visibility="collapsed")
+                if q.get("max"):
+                    st.markdown(f'<div class="qsub">{len(ss.get(k) or [])}/{q["max"]} picked</div>',
+                                unsafe_allow_html=True)
+                st.pills(q["text"], q["options"], selection_mode="multi", key=k, label_visibility="collapsed",
+                         **({"on_change": limit_picks, "args": (k, q["max"])} if q.get("max") else {}))
                 if q.get("only") and q["only"] in (ss.get(k) or []) and len(ss.get(k)) > 1:
                     st.caption(f"“{q['only']}” can't be combined with other answers.")
             else:
@@ -703,7 +739,7 @@ def check_answers():
                          "correct": ("yes" if v == q["correct"] else "no") if q.get("correct") else ""})
         elif q["type"] == "multi":
             v = ss.get(k) or []
-            if not v or (q.get("only") in v and len(v) > 1):
+            if not v or (q.get("only") in v and len(v) > 1) or (q.get("max") and len(v) > q["max"]):
                 problems.append(q["id"])
             rows.append({**base, "question_no": i, "question": q["text"], "answer": " | ".join(v), "correct": ""})
         else:
@@ -962,7 +998,9 @@ def page_fund(df):
     room = TOTAL - total_committed()
     sip_ok = not pd.isna(f["min_sip"])
 
-    st.button("← Back to " + ("portfolio" if ss.tab == "portfolio" else "all funds"), on_click=close_fund, args=(name,))
+    with st.container(key="backbar"):      # pinned to the top of the screen, so Back is always reachable
+        st.button("← Back to " + ("portfolio" if ss.tab == "portfolio" else "all funds"), key="back_btn",
+                  on_click=close_fund, args=(name,))
     aum = "–" if pd.isna(f["aum_cr"]) else f"₹{inr(f['aum_cr'], 2)} Cr."
     st.markdown(f'<div class="fhead" style="margin:8px 0 6px">{logo(f["amc"], 60)}<div>'
                 f'<div class="fname" style="font-size:22px">{esc(name)}</div>'
@@ -1075,7 +1113,8 @@ def page_fund(df):
 # ---------------------------------------------------------------- database
 TABLES = {
     "investors": ["rid", "name", "app", "status", "started_at", "last_active", "completed_at", "minutes_taken",
-                  "invested", "cash", "n_funds", "n_sips", "capitalmind_amount", "funds_opened", "taps"],
+                  "invested", "cash", "n_funds", "n_sips", "capitalmind_amount", "funds_opened", "taps",
+                  "age", "location"],
     "purchases": ["rid", "name", "time", "fund_name", "amc", "category", "sub_category", "type", "amount",
                   "sip_monthly", "committed", "list_position"],
     "portfolio": ["rid", "name", "submitted_at", "fund_name", "amc", "category", "sub_category", "risk",
@@ -1230,7 +1269,8 @@ def investor_row(status=None):
             "invested": invested, "cash": TOTAL - invested, "n_funds": len(held),
             "n_sips": sum(1 for h in held.values() if h.get("sip")), "capitalmind_amount": cm,
             "funds_opened": len({e["fund"] for e in ss.events if e["code"] == "open_fund"}),
-            "taps": sum(1 for e in ss.events if e["code"] != "list_order")}
+            "taps": sum(1 for e in ss.events if e["code"] != "list_order"),
+            "age": ss.get("age", ""), "location": ss.get("location", "")}
 
 
 def flush(purchases=None, portfolio=None, answers=None):
@@ -1331,7 +1371,10 @@ def page_admin(funds):
 
     tab1, tab2, tab3, tab5, tab4 = st.tabs(["Investors", "One investor", "Funds", "Answers", "Download"])
     with tab1:
-        show = inv[["name", "app", "status", "invested", "cash", "n_funds", "n_sips", "capitalmind_amount",
+        for c in ("age", "location"):
+            if c not in inv:
+                inv[c] = ""
+        show = inv[["name", "age", "location", "app", "status", "invested", "cash", "n_funds", "n_sips", "capitalmind_amount",
                     "funds_opened", "taps", "minutes_taken", "started_at", "rid"]].sort_values("started_at", ascending=False)
         st.dataframe(show, hide_index=True, width="stretch", column_config={
             "invested": st.column_config.NumberColumn("Invested ₹", format="%d"),
@@ -1415,6 +1458,16 @@ def page_admin(funds):
             st.info("No one has finished the questions yet.")
         else:
             st.caption(f"{ans['rid'].nunique()} people answered.")
+            who = inv[inv["rid"].isin(ans["rid"])]
+            for col, title, order in (("age", "Age", AGES), ("location", "Location", None)):
+                if col in who:
+                    v = who[col].fillna("").astype(str)
+                    v = v[v != ""].value_counts()
+                    if order:
+                        v = v.reindex(order, fill_value=0)
+                    if len(v):
+                        st.markdown(f"**{title}** (from the start page)")
+                        st.bar_chart(v, horizontal=True, height=40 + 36 * len(v))
             opts = {}
             for q in QUESTIONS:
                 opts[q["text"]] = q["options"]

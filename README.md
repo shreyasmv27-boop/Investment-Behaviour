@@ -4,7 +4,7 @@ A Streamlit app for the Capitalmind "Crossing the Chasm" study. Each respondent 
 
 ## Flow
 
-1. **Start**: name, and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
+1. **Start**: name, age range, location (5 cities or Other, typed in) and the app they mainly use (Groww, Zerodha Coin, Angel One, PhonePe, Paytm Money, Other).
 2. **Mutual funds tab**: fund list showing only logo, name, AUM, plan, category and sub category. Filters on the left: AMC, Category (with sub category), Dividend type, Min. purchase amount, Expense ratio, AUM, Exit load and CAGR. Search and sort at the top. Click a fund name to open it.
 3. **Fund page**: NAV chart (3M to Max, from the `nav_history` sheet), 1Y/3Y/5Y CAGR returns, NAV, AUM, expense ratio, minimums, exit load, fund manager and a risk gauge. Two options: **Buy** (one-time amount) or **SIP** (monthly amount for `SIP_MONTHS` months, default 12; the full commitment counts against the ₹1,00,000). Funds with no `min_sip` value don't offer SIP.
 4. **Portfolio tab**: holdings with type, NAV, amount and allocation. As in a real app, money can't be pulled back out: Buy adds to the lump sum and SIP adds to the monthly amount. The portfolio is saved automatically after every Buy or SIP.
@@ -104,11 +104,11 @@ streamlit run app.py
 
 | Tab | One row per | Main columns |
 |---|---|---|
-| `investors` | investor (updated as they go) | name, app, status (in progress / completed), invested, cash, funds, SIPs, Capitalmind amount, funds opened, taps, minutes |
+| `investors` | investor (updated as they go) | name, app, status (in progress / completed), age, location, invested, cash, funds, SIPs, Capitalmind amount, funds opened, taps, minutes |
 | `purchases` | every Buy or SIP | fund, type, amount, monthly SIP, list position |
 | `portfolio` | fund in the final, submitted portfolio | lump sum, SIP, committed, share |
 | `clicks` | every tap | time, seconds from start, screen, action, fund, detail |
-| `answers` | investor who finished the questions | one column per question (top/bottom question has two columns; quiz has a `_correct` column) |
+| `answers` | investor who finished the questions | one row per question: question number, question, answer, correct (quiz only); the top/bottom question gives two rows (5a, 5b) |
 
 Tabs are created automatically the first time someone uses the app. Writing happens in the background, so taps never wait for Google.
 Taps on the filter button itself and on the dialog's close (X) can't be recorded; every filter change, the fund manager links and all other buttons are.
@@ -124,7 +124,8 @@ Open `<your app url>/?admin=1` and enter `admin_password` from Secrets. Tabs: In
 ## Questions after "Completed"
 
 Edit the `QUESTIONS` list near the top of `app.py`. Each question is a small block (id, type, text, options).
-Add new questions at the end of the list; the `answers` tab gets a new column automatically.
+Types: `single` (pick one), `multi` (pick several; `"max": 3` caps the picks, `"only"` marks an option that can't be combined) and `top_bottom`.
+Age and location are asked on the start page and saved in the `investors` tab, not with the questions.
 
 ## Holdings and sectors
 
