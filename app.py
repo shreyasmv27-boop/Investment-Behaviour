@@ -27,7 +27,7 @@ st.set_page_config(page_title="Invest", page_icon="₹", layout="wide", initial_
 TOTAL = 100_000              # investable amount per respondent
 STEP = 500                   # amount input step
 SIP_MONTHS = 12            # an SIP commits monthly amount x SIP_MONTHS out of the Rs 1,00,000
-SHUFFLE_ORDER = True         # random fund order per respondent; the order is logged to test position effects
+SHUFFLE_ORDER = False        # False: every participant sees funds in the row order of funds.xlsx (display_order)
 DATA_FILE = Path(__file__).parent / "funds.xlsx"
 NAV_FILE = Path(__file__).parent / "nav_history.csv"
 HOLDINGS_FILE = Path(__file__).parent / "holdings.xlsx"
@@ -39,6 +39,8 @@ HOLDINGS_FILE = Path(__file__).parent / "holdings.xlsx"
 #   type "top_bottom": pick exactly `top` best and `bottom` worst from the same list
 #   "correct": for quiz questions, the right option (saved as a separate *_correct column)
 QUESTIONS = [
+    {"id": "age", "type": "single", "text": "What is your age range?",
+     "options": ["Under 30 years", "30 to 50 years", "Over 50 years"]},
     {"id": "experience", "type": "single", "text": "How long have you been investing in mutual funds?",
      "options": ["Less than 2 years", "2 to 6 years", "More than 6 years"]},
     {"id": "quiz_turnover", "type": "single",
@@ -322,6 +324,12 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
 .st-key-actions button[kind="secondary"]:disabled {{border-color:#ddd; color:#aaa;}}
 .st-key-complete_btn button {{height:48px; border-radius:12px; margin-top:-4px;}}
 .st-key-complete_btn button p {{font-weight:600; font-size:16px;}}
+.st-key-retbox {{background:{t['soft']}; border-radius:14px; padding:10px 14px; margin:8px 0 4px;}}
+.st-key-retbox [data-testid="stHorizontalBlock"] {{flex-wrap:nowrap !important;}}
+.st-key-retbox [data-testid="stColumn"] {{min-width:0 !important; flex:1 1 0 !important; width:auto !important;}}
+.retl {{font-size:13px; color:#777; margin-bottom:2px;}}
+.retv {{font-size:26px; font-weight:700; color:{t['accent']}; text-align:right;}}
+.retn {{font-size:12px; color:#8a8a8a; text-align:right;}}
 .htitle {{font-size:17px; font-weight:600; color:#222; margin:22px 0 8px;}}
 .hcard {{border:1px solid #eee; border-radius:14px; padding:12px 16px 4px;}}
 .hb-t {{display:flex; justify-content:space-between; gap:12px; font-size:14px; color:#222;}}
@@ -385,6 +393,8 @@ def load_funds(path: str):
     df["plan"] = df["plan"].fillna("Growth")
     df["min_lumpsum"] = df["min_lumpsum"].fillna(0)
     df["risk"] = df["risk"].astype(str).str.strip()
+    if "display_order" in df.columns:
+        df = df.sort_values("display_order", kind="stable").reset_index(drop=True)
     df["fid"] = [f"f{i:03d}" for i in range(len(df))]
     return df, None
 
@@ -511,7 +521,7 @@ ACTIONS = {  # event code -> readable action name in the database and dashboard
     "sort": "Changed sort", "filter_reset": "Tapped Reset filters", "open_fund": "Opened fund",
     "close_fund": "Tapped Back", "chart_period": "Changed chart period", "choose_mode": "Tapped Buy/SIP button",
     "buy": "Bought (lump sum)", "sip": "Started/added SIP", "buy_failed": "Buy/SIP not accepted",
-    "manager_click": "Tapped fund manager name", "use_max": "Tapped Use maximum amount", "complete_open": "Tapped Completed",
+    "manager_click": "Tapped fund manager name", "return_period": "Changed CAGR period", "use_max": "Tapped Use maximum amount", "complete_open": "Tapped Completed",
     "complete_cancel": "Tapped Keep investing", "complete": "Submitted portfolio",
 "survey_incomplete": "Tapped Done (questions unanswered)",
     "survey_done": "Tapped Done (survey completed)",
@@ -960,9 +970,17 @@ def page_fund(df):
                 f'<span>{esc(f["category"])} · {esc(f["sub_category"])}</span></div></div></div>',
                 unsafe_allow_html=True)
     nav_chart(f)
-    st.markdown(f"""<div class="rets"><div><span>1Y CAGR return</span><b>{pct(f['return_1y'])}</b></div>
-<div><span>3Y CAGR return</span><b>{pct(f['return_3y'])}</b></div>
-<div><span>5Y CAGR return</span><b>{pct(f['return_5y'])}</b></div></div>""", unsafe_allow_html=True)
+    periods = {"1 Year": "return_1y", "3 Years": "return_3y", "5 Years": "return_5y"}
+    rk = f"ret_{fid}"
+    with st.container(key="retbox"):
+        c1, c2 = st.columns([1, 1.3], vertical_alignment="center", gap="small")
+        with c1:
+            st.markdown('<div class="retl">CAGR</div>', unsafe_allow_html=True)
+            per = st.selectbox("CAGR period", list(periods), index=1, key=rk, label_visibility="collapsed",
+                               on_change=lambda: log("return_period", name, st.session_state.get(rk)))
+        v = f[periods[per]]
+        c2.markdown(f'<div class="retv">{pct(v)}</div>' + ("" if not pd.isna(v) else
+                    '<div class="retn">Fund is too new for this period</div>'), unsafe_allow_html=True)
     st.markdown(risk_gauge(f["risk"]), unsafe_allow_html=True)
 
     # ---- Buy / SIP, placed right under the risk meter so it is on the first screen of a phone

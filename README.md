@@ -108,6 +108,7 @@ streamlit run app.py
 | `purchases` | every Buy or SIP | fund, type, amount, monthly SIP, list position |
 | `portfolio` | fund in the final, submitted portfolio | lump sum, SIP, committed, share |
 | `clicks` | every tap | time, seconds from start, screen, action, fund, detail |
+| `answers` | investor who finished the questions | one column per question (top/bottom question has two columns; quiz has a `_correct` column) |
 
 Tabs are created automatically the first time someone uses the app. Writing happens in the background, so taps never wait for Google.
 Taps on the filter button itself and on the dialog's close (X) can't be recorded; every filter change, the fund manager links and all other buttons are.
@@ -119,3 +120,18 @@ Open `<your app url>/?admin=1` and enter `admin_password` from Secrets. Tabs: In
 ## NAV charts
 
 `nav_history.csv` (columns `fund_name`, `date`, `nav`) feeds the fund page charts. `fund_name` must match `funds.xlsx` exactly.
+
+## Questions after "Completed"
+
+Edit the `QUESTIONS` list near the top of `app.py`. Each question is a small block (id, type, text, options).
+Add new questions at the end of the list; the `answers` tab gets a new column automatically.
+
+## Holdings and sectors
+
+`holdings.xlsx` has two sheets: `holdings` (top 5 per fund) and `sectors` (sector split). `fund_name` must match `funds.xlsx` exactly.
+
+## Fund order
+
+Every participant sees funds in the same order: the `display_order` column in `funds.xlsx`
+(Equity, Hybrid, Debt, Others; largest fund first within each; Capitalmind Flexi Cap placed 5th).
+To change the order, edit the numbers in `display_order`. Sorting in the app ("Default" vs other sorts) still works and is logged.
