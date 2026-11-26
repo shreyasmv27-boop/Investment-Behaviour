@@ -30,6 +30,56 @@ SIP_MONTHS = 12            # an SIP commits monthly amount x SIP_MONTHS out of t
 SHUFFLE_ORDER = True         # random fund order per respondent; the order is logged to test position effects
 DATA_FILE = Path(__file__).parent / "funds.xlsx"
 NAV_FILE = Path(__file__).parent / "nav_history.csv"
+HOLDINGS_FILE = Path(__file__).parent / "holdings.xlsx"
+
+# ---- Questionnaire shown after "Completed". Every question is mandatory.
+# To add a question, add a dict here. "id" becomes the column name in the Google Sheet (keep ids unique and
+# add new questions at the end, so existing columns don't shift).
+#   type "single": pick one option        type "multi": pick one or more ("only" = option that can't be combined)
+#   type "top_bottom": pick exactly `top` best and `bottom` worst from the same list
+#   "correct": for quiz questions, the right option (saved as a separate *_correct column)
+QUESTIONS = [
+    {"id": "experience", "type": "single", "text": "How long have you been investing in mutual funds?",
+     "options": ["Less than 2 years", "2 to 6 years", "More than 6 years"]},
+    {"id": "quiz_turnover", "type": "single",
+     "text": "A mutual fund shows a portfolio turnover of 100%. What does that mean?",
+     "options": ["The fund's value doubled in a year", "The fund replaced roughly all its holdings over the year",
+                 "The fund charges 100% in fees", "I'm not sure"],
+     "correct": "The fund replaced roughly all its holdings over the year"},
+    {"id": "heard_from", "type": "single", "text": "Where did you last hear about a fund you bought?",
+     "options": ["Instagram", "YouTube", "Friend or advisor", "Newspaper"]},
+    {"id": "portfolio_similar", "type": "single", "text": "Is the portfolio you built here similar to your real one?",
+     "options": ["Yes", "Partly", "No"]},
+    {"id": "philosophy", "type": "top_bottom", "top": 3, "bottom": 2,
+     "text": "Based on your investment philosophy, which factors matter most and least when you pick a fund?",
+     "options": ["AMC brand", "CAGR return (1Y/3Y/5Y)", "Expense ratio", "Exit load", "Fund manager", "Fund size",
+                 "Sector allocation", "Portfolio allocation", "Fund age"]},
+    {"id": "new_vs_established", "type": "single",
+     "text": "Let's say a new fund has given a 10% CAGR over the last 3 years and has an AUM of ₹500 crore, while a "
+             "well-established fund with an AUM of ₹10,000 crore has given an 8% CAGR over the same period. Assuming "
+             "the exit load and expense ratio are the same for both, which one would you choose?",
+     "options": ["The new fund", "The well-established fund"]},
+    {"id": "global_view", "type": "single",
+     "text": "For long-term investing, how do you feel about putting some money into US or global markets, "
+             "through funds that invest abroad?",
+     "options": ["I already do this", "I would consider it", "I'm unsure", "I wouldn't, I prefer India"]},
+    {"id": "abandoned_fund", "type": "multi", "only": "No, never",
+     "text": "Have you ever stopped investing in a fund or sold it for any of these reasons? Select all that apply.",
+     "options": ["Underperformance", "Panic during a market fall", "Fund manager change", "Found a better fund",
+                 "Costs (expense ratio or exit load)", "Its sector fell out of favour", "No, never"]},
+]
+
+
+def answer_columns():
+    cols = []
+    for q in QUESTIONS:
+        if q["type"] == "top_bottom":
+            cols += [f"{q['id']}_top", f"{q['id']}_bottom"]
+        else:
+            cols.append(q["id"])
+        if q.get("correct"):
+            cols.append(f"{q['id']}_correct")
+    return cols
 FLUSH_EVERY = 6              # send clicks to the database after this many taps (plus at every purchase / completion)
 LOCAL_DIR = Path(__file__).parent / "responses"
 
@@ -283,6 +333,20 @@ a.mgr {{color:{t['accent']}; text-decoration:none; border-bottom:1px dashed {t['
 .st-key-actions button[kind="secondary"]:disabled {{border-color:#ddd; color:#aaa;}}
 .st-key-complete_btn button {{height:48px; border-radius:12px; margin-top:-4px;}}
 .st-key-complete_btn button p {{font-weight:600; font-size:16px;}}
+.st-key-holdbox {{margin-top:16px;}}
+.hcard {{border:1px solid #eee; border-radius:14px; padding:12px 16px 4px; margin-top:-4px;}}
+.hb-t {{display:flex; justify-content:space-between; gap:12px; font-size:14px; color:#222;}}
+.hb-t small {{display:block; color:#8a8a8a; font-size:12px;}}
+.hb .bar {{height:6px; margin:4px 0 10px;}}
+.hsub {{font-size:12px; color:#8a8a8a; margin:6px 0 6px; text-transform:uppercase; letter-spacing:.03em;}}
+.qhead h3 {{margin:0 0 4px;}} .qhead p {{color:#666; font-size:15px;}}
+.qt {{font-size:16px; font-weight:500; color:#222; line-height:1.4; margin-bottom:6px;}}
+.qn {{display:inline-block; min-width:24px; height:24px; border-radius:50%; background:{t['soft']}; color:{t['accent']};
+  font-size:13px; text-align:center; line-height:24px; margin-right:8px; font-weight:600;}}
+.qmiss {{color:#C0392B; font-size:13px; font-weight:600; margin-left:6px;}}
+.qsub {{font-size:14px; color:#555; margin:6px 0 2px;}}
+.st-key-survey_done_btn button {{height:50px; border-radius:12px;}}
+.st-key-survey_done_btn button p {{font-weight:600; font-size:17px;}}
 .sipcalc {{font-size:14px; color:#555; margin:-6px 0 10px;}}
 .sipcalc.over {{color:#C0392B;}}
 .st-key-go_btn button {{height:48px; border-radius:10px;}}
@@ -347,6 +411,56 @@ def load_nav(path: str):
     nav["nav"] = pd.to_numeric(nav["nav"], errors="coerce")
     nav = nav.dropna(subset=["date", "nav"]).sort_values("date")
     return {k: g[["date", "nav"]].reset_index(drop=True) for k, g in nav.groupby("fund_name")}
+
+
+@st.cache_data
+def load_holdings(path: str):
+    """holdings.xlsx: sheet 'holdings' (top 5 per fund) and sheet 'sectors' (sector split per fund)."""
+    try:
+        h = pd.read_excel(path, sheet_name="holdings")
+        s = pd.read_excel(path, sheet_name="sectors")
+    except Exception:
+        return {}, {}
+    s["asset_class"] = s["asset_class"].fillna("")
+    return ({k: g.sort_values("rank") for k, g in h.groupby("fund_name")},
+            {k: g for k, g in s.groupby("fund_name")})
+
+
+def bars(rows, label_col, sub_col=None):
+    out = []
+    for _, r in rows.iterrows():
+        sub = f'<small>{esc(r[sub_col])}</small>' if sub_col and str(r.get(sub_col, "")) not in ("", "nan") else ""
+        w = max(float(r["weight"]), 0) * 100
+        out.append(f'<div class="hb"><div class="hb-t"><span>{esc(r[label_col])}{sub}</span><b>{w:.1f}%</b></div>'
+                   f'<div class="bar"><div style="width:{min(w, 100):.1f}%"></div></div></div>')
+    return "".join(out)
+
+
+def holdings_section(f):
+    hold, sect = load_holdings(str(HOLDINGS_FILE)) if HOLDINGS_FILE.exists() else ({}, {})
+    name = f["fund_name"]
+    if name not in hold and name not in sect:
+        return
+    key = f"hv_{f.name}"
+    with st.container(key="holdbox"):
+        st.segmented_control("Holdings", ["Sector allocation", "Top 5 holdings"], key=key,
+                             label_visibility="collapsed",
+                             on_change=lambda: log("holdings_view", name, st.session_state.get(key) or "closed"))
+    pick = st.session_state.get(key)
+    if pick == "Sector allocation" and name in sect:
+        g = sect[name]
+        html = ""
+        classes = [a for a in dict.fromkeys(g["asset_class"]) if a]
+        if len(classes) > 1:
+            for a in classes:
+                part = g[g["asset_class"] == a].sort_values("weight", ascending=False)
+                html += f'<div class="hsub">Within the {esc(a.lower())} part of the fund</div>' + bars(part, "sector")
+        else:
+            html = bars(g.sort_values("weight", ascending=False), "sector")
+        st.markdown(f'<div class="hcard">{html}</div>', unsafe_allow_html=True)
+    elif pick == "Top 5 holdings" and name in hold:
+        st.markdown(f'<div class="hcard">{bars(hold[name], "holding", "instrument")}</div>',
+                    unsafe_allow_html=True)
 
 
 def data_as_of():
@@ -414,7 +528,9 @@ ACTIONS = {  # event code -> readable action name in the database and dashboard
     "close_fund": "Tapped Back", "chart_period": "Changed chart period", "choose_mode": "Tapped Buy/SIP button",
     "buy": "Bought (lump sum)", "sip": "Started/added SIP", "buy_failed": "Buy/SIP not accepted",
     "manager_click": "Tapped fund manager name", "use_max": "Tapped Use maximum amount", "complete_open": "Tapped Completed",
-    "complete_cancel": "Tapped Keep investing", "complete": "Confirmed and submitted",
+    "complete_cancel": "Tapped Keep investing", "complete": "Submitted portfolio",
+    "holdings_view": "Opened holdings section", "survey_incomplete": "Tapped Done (questions unanswered)",
+    "survey_done": "Tapped Done (survey completed)",
 }
 
 
@@ -424,6 +540,8 @@ def screen():
         return "start"
     if ss.get("step") == "done":
         return "thank you"
+    if ss.get("step") == "survey":
+        return "questions"
     return "fund page" if ss.get("view") else ("portfolio" if ss.get("tab") == "portfolio" else "fund list")
 
 
@@ -518,6 +636,79 @@ def wallet():
               on_click=lambda: (log("complete_open"), st.session_state.update(confirm=True)))
 
 
+def page_survey():
+    ss = st.session_state
+    base_css(APPS[ss.app])
+    scroll_top()
+    st.markdown("""<div class="qhead"><h3>A few quick questions</h3>
+<p>Your portfolio is saved. Please answer every question, then tap Done. There are no right or wrong answers
+except where you're asked to pick the correct meaning.</p></div>""", unsafe_allow_html=True)
+    missing = ss.get("survey_missing", set())
+    for i, q in enumerate(QUESTIONS, 1):
+        with st.container(border=True, key=f"q_{q['id']}"):
+            flag = ' <span class="qmiss">Please answer</span>' if q["id"] in missing else ""
+            st.markdown(f'<div class="qt"><span class="qn">{i}</span>{esc(q["text"])}{flag}</div>',
+                        unsafe_allow_html=True)
+            k = f"ans_{q['id']}"
+            if q["type"] == "single":
+                st.radio(q["text"], q["options"], index=None, key=k, label_visibility="collapsed")
+            elif q["type"] == "multi":
+                st.pills(q["text"], q["options"], selection_mode="multi", key=k, label_visibility="collapsed")
+                if q.get("only") and q["only"] in (ss.get(k) or []) and len(ss.get(k)) > 1:
+                    st.caption(f"“{q['only']}” can't be combined with other answers.")
+            else:
+                st.markdown(f'<div class="qsub">Pick the <b>{q["top"]} that matter most</b></div>',
+                            unsafe_allow_html=True)
+                top = st.pills("Most", q["options"], selection_mode="multi", key=k + "_top",
+                               label_visibility="collapsed")
+                st.markdown(f'<div class="qsub">Pick the <b>{q["bottom"]} that matter least</b></div>',
+                            unsafe_allow_html=True)
+                st.pills("Least", [o for o in q["options"] if o not in (top or [])], selection_mode="multi",
+                         key=k + "_bottom", label_visibility="collapsed")
+    if st.button("Done", type="primary", width="stretch", key="survey_done_btn", icon=":material/task_alt:"):
+        problems, row = check_answers()
+        if problems:
+            ss.survey_missing = set(problems)
+            log("survey_incomplete", value=", ".join(problems))
+            st.rerun()
+        log("survey_done")
+        ss.status, ss.completed_at, ss.step = "completed", now(), "done"
+        flush(answers=[row])
+        st.rerun()
+    if missing:
+        st.error(f"Please answer {len(missing)} more question{'s' if len(missing) > 1 else ''} (marked in red).")
+
+
+def check_answers():
+    """Returns (ids of unanswered or invalid questions, answers row for the database)."""
+    ss = st.session_state
+    problems = []
+    row = {"rid": ss.rid, "name": ss.name, "app": ss.app, "submitted_at": now(),
+           "seconds_on_questions": int((datetime.fromisoformat(now()) -
+                                        datetime.fromisoformat(ss.get("survey_started", now()))).total_seconds())}
+    for q in QUESTIONS:
+        k = f"ans_{q['id']}"
+        if q["type"] == "single":
+            v = ss.get(k)
+            if not v:
+                problems.append(q["id"])
+            row[q["id"]] = v or ""
+        elif q["type"] == "multi":
+            v = ss.get(k) or []
+            if not v or (q.get("only") in v and len(v) > 1):
+                problems.append(q["id"])
+            row[q["id"]] = " | ".join(v)
+        else:
+            top, bottom = ss.get(k + "_top") or [], ss.get(k + "_bottom") or []
+            bottom = [b for b in bottom if b not in top]
+            if len(top) != q["top"] or len(bottom) != q["bottom"]:
+                problems.append(q["id"])
+            row[f"{q['id']}_top"], row[f"{q['id']}_bottom"] = " | ".join(top), " | ".join(bottom)
+        if q.get("correct"):
+            row[f"{q['id']}_correct"] = "yes" if row.get(q["id"]) == q["correct"] else "no"
+    return problems, row
+
+
 @st.dialog("Submit your portfolio?")
 def confirm_dialog(df):
     ss = st.session_state
@@ -528,7 +719,7 @@ def confirm_dialog(df):
                  f"with **₹{inr(TOTAL - invested)}** left as cash.")
     else:
         st.write("You haven't invested in any fund yet. Your whole ₹1,00,000 will stay as cash.")
-    st.write("You won't be able to change it after this.")
+    st.write("You won't be able to change it after this. A few quick questions come next.")
     c1, c2 = st.columns(2)
     if c1.button("Keep investing", width="stretch"):
         log("complete_cancel")
@@ -536,7 +727,9 @@ def confirm_dialog(df):
         st.rerun()
     if c2.button("Submit", type="primary", width="stretch"):
         log("complete", value=f"invested ₹{invested}")
-        ss.status, ss.completed_at, ss.step, ss.confirm = "completed", now(), "done", False
+        ss.status, ss.step, ss.confirm = "portfolio submitted", "survey", False
+        ss.survey_started = now()
+        ss.nav_count = ss.get("nav_count", 0) + 1
         flush(portfolio=final_portfolio(df))
         st.rerun()
 
@@ -545,7 +738,7 @@ def page_thanks():
     base_css(APPS[st.session_state.get("app") or "Other / I don't invest yet"])
     st.markdown("""<div class="thanks"><div class="tick">✓</div>
 <h2>Thanks for being part of our survey</h2>
-<p>Your choices have been recorded. You can close this page now.</p></div>""", unsafe_allow_html=True)
+<p>Your portfolio and answers have been recorded. You can close this page now.</p></div>""", unsafe_allow_html=True)
     form_url, id_field = secret("form_url"), secret("form_id_field")
     if form_url:
         rid = st.session_state.rid
@@ -856,6 +1049,7 @@ def page_fund(df):
 <div style="grid-column:1 / -1"><span>Exit load</span>{esc(f['exit_load'])}</div>
 <div style="grid-column:1 / -1;border-bottom:none"><span>Fund manager</span>{manager_links(f['fund_manager'], name)}</div>
 </div>""", unsafe_allow_html=True)
+    holdings_section(f)
     asof = data_as_of()
     if asof:
         st.markdown(f'<div class="note">Data as of {asof}</div>', unsafe_allow_html=True)
@@ -870,6 +1064,7 @@ TABLES = {
     "portfolio": ["rid", "name", "submitted_at", "fund_name", "amc", "category", "sub_category", "risk",
                   "lump_sum", "sip_monthly", "committed", "share", "list_position"],
     "clicks": ["rid", "name", "time", "seconds_from_start", "screen", "action", "fund", "detail", "code"],
+    "answers": ["rid", "name", "app", "submitted_at", "seconds_on_questions"] + answer_columns(),
 }
 
 
@@ -904,12 +1099,15 @@ def _write(job, mem):
                     w = sh.worksheet(name)
                 except gspread.WorksheetNotFound:
                     w = sh.add_worksheet(name, rows=1000, cols=len(TABLES[name]))
-                if not w.row_values(1):
+                head = w.row_values(1)
+                if head != TABLES[name] and head == TABLES[name][:len(head)]:   # empty, or new questions added
+                    if w.col_count < len(TABLES[name]):
+                        w.add_cols(len(TABLES[name]) - w.col_count)
                     w.update(values=[TABLES[name]], range_name="A1")
                 mem[key] = w
             return mem[key]
 
-        for name in ("purchases", "portfolio", "clicks"):
+        for name in ("purchases", "portfolio", "clicks", "answers"):
             if job.get(name):
                 ws(name).append_rows([[str(r.get(c, "")) for c in TABLES[name]] for r in job[name]],
                                      value_input_option="RAW")
@@ -929,10 +1127,15 @@ def _write(job, mem):
         rows[inv["rid"]] = row
     else:
         LOCAL_DIR.mkdir(exist_ok=True)
-        for name in ("purchases", "portfolio", "clicks"):
+        for name in ("purchases", "portfolio", "clicks", "answers"):
             if job.get(name):
                 p = LOCAL_DIR / f"{name}.csv"
-                pd.DataFrame(job[name], columns=TABLES[name]).to_csv(p, mode="a", header=not p.exists(), index=False)
+                new = pd.DataFrame(job[name], columns=TABLES[name])
+                if p.exists() and list(pd.read_csv(p, nrows=0).columns) != TABLES[name]:
+                    new = pd.concat([pd.read_csv(p, dtype=str), new]).reindex(columns=TABLES[name])
+                    new.to_csv(p, index=False)
+                else:
+                    new.to_csv(p, mode="a", header=not p.exists(), index=False)
         if not inv:
             return
         p = LOCAL_DIR / "investors.csv"
@@ -1009,13 +1212,13 @@ def investor_row(status=None):
             "taps": sum(1 for e in ss.events if e["code"] != "list_order")}
 
 
-def flush(purchases=None, portfolio=None):
+def flush(purchases=None, portfolio=None, answers=None):
     """Queue the investor row, new clicks and any purchase / final portfolio rows for the background writer."""
     ss = st.session_state
     new = ss.events[ss.get("events_saved", 0):]
     ss.events_saved = len(ss.events)
     writer()[0].put({"investor": investor_row(), "clicks": new, "purchases": purchases or [],
-                     "portfolio": portfolio or []})
+                     "portfolio": portfolio or [], "answers": answers or []})
 
 
 def purchase_row(f, kind, amt):
@@ -1091,7 +1294,7 @@ def page_admin(funds):
     c_b.caption(("Reading from Google Sheets" if use_sheets() else "Reading from local CSV files (Google Sheets not set up)")
                 + ". Updates every minute.")
     t = read_tables(st.session_state.get("stamp", 0))
-    inv, pur, port, clk = t["investors"], t["purchases"], t["portfolio"], t["clicks"]
+    inv, pur, port, clk, ans = t["investors"], t["purchases"], t["portfolio"], t["clicks"], t["answers"]
     if inv.empty:
         st.info("No responses yet.")
         return
@@ -1100,12 +1303,12 @@ def page_admin(funds):
 
     m = st.columns(5)
     m[0].metric("Started", len(inv))
-    m[1].metric("Completed", f"{len(done)}  ({len(done) / len(inv):.0%})")
+    m[1].metric("Completed (incl. questions)", f"{len(done)}  ({len(done) / len(inv):.0%})")
     m[2].metric("Avg. invested", f"₹{inr(done['invested'].mean() if len(done) else 0)}")
     m[3].metric("Avg. funds", f"{done['n_funds'].mean():.1f}" if len(done) else "–")
     m[4].metric("Put money in Capitalmind", f"{(done['capitalmind_amount'] > 0).mean():.0%}" if len(done) else "–")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Investors", "One investor", "Funds", "Download"])
+    tab1, tab2, tab3, tab5, tab4 = st.tabs(["Investors", "One investor", "Funds", "Answers", "Download"])
     with tab1:
         show = inv[["name", "app", "status", "invested", "cash", "n_funds", "n_sips", "capitalmind_amount",
                     "funds_opened", "taps", "minutes_taken", "started_at", "rid"]].sort_values("started_at", ascending=False)
@@ -1115,7 +1318,8 @@ def page_admin(funds):
             "capitalmind_amount": st.column_config.NumberColumn("Capitalmind ₹", format="%d"),
             "n_funds": "Funds", "n_sips": "SIPs", "funds_opened": "Funds opened", "taps": "Taps",
             "minutes_taken": st.column_config.NumberColumn("Minutes", format="%.1f")})
-        st.caption("A row appears as soon as someone taps Continue. Status turns to completed when they submit.")
+        st.caption("A row appears as soon as someone taps Continue. Status: in progress → portfolio submitted "
+                   "(tapped Completed) → completed (answered the questions and tapped Done).")
         with st.expander("Delete test or dummy entries"):
             labels = {r.rid: f"{r['name']} · {r['app']} · {r['status']} · started {r['started_at']}"
                       for _, r in inv.sort_values("started_at", ascending=False).iterrows()}
@@ -1156,6 +1360,23 @@ def page_admin(funds):
                          .sort_values("committed", ascending=False), hide_index=True, width="stretch",
                          column_config={"share": st.column_config.ProgressColumn("Share", format="percent",
                                                                                 min_value=0, max_value=1)})
+        a = ans[ans["rid"] == rid]
+        st.markdown("**Answers**")
+        if a.empty:
+            st.caption("No answers yet.")
+        else:
+            a = a.iloc[-1]
+            qa = []
+            for q in QUESTIONS:
+                if q["type"] == "top_bottom":
+                    qa.append((q["text"] + " (most)", a.get(f"{q['id']}_top", "")))
+                    qa.append((q["text"] + " (least)", a.get(f"{q['id']}_bottom", "")))
+                else:
+                    v = a.get(q["id"], "")
+                    if q.get("correct"):
+                        v = f"{v}  ({'correct' if a.get(q['id'] + '_correct') == 'yes' else 'wrong'})"
+                    qa.append((q["text"], v))
+            st.dataframe(pd.DataFrame(qa, columns=["Question", "Answer"]), hide_index=True, width="stretch")
         st.markdown("**Every tap, in order**")
         c = clk[clk["rid"] == rid].copy()
         c = c.sort_values("time")
@@ -1177,6 +1398,31 @@ def page_admin(funds):
                                     "people_opened": "Opened by", "people_bought": "Bought by"})
         st.caption(f"Based on {'submitted portfolios' if not port.empty else 'purchases so far'}. "
                    "Opened → bought shows how often a look turned into money.")
+    with tab5:
+        if ans.empty:
+            st.info("No one has finished the questions yet.")
+        else:
+            st.caption(f"{len(ans)} people answered. Counts include everyone who tapped Done.")
+            for i, q in enumerate(QUESTIONS, 1):
+                st.markdown(f"**{i}. {q['text']}**")
+                if q["type"] == "top_bottom":
+                    c1, c2 = st.columns(2)
+                    for col, part, lab in ((c1, "top", "Picked as most important"),
+                                           (c2, "bottom", "Picked as least important")):
+                        v = ans[f"{q['id']}_{part}"].fillna("").str.split(" \\| ").explode()
+                        v = v[v != ""].value_counts().reindex(q["options"], fill_value=0)
+                        col.caption(lab)
+                        col.bar_chart(v, horizontal=True, height=260)
+                else:
+                    v = ans[q["id"]].fillna("")
+                    if q["type"] == "multi":
+                        v = v.str.split(" \\| ").explode()
+                    v = v[v != ""].value_counts().reindex(q["options"], fill_value=0)
+                    st.bar_chart(v, horizontal=True, height=40 + 36 * len(q["options"]))
+                    if q.get("correct"):
+                        st.caption(f"Answered correctly: {(ans[q['id'] + '_correct'] == 'yes').mean():.0%}")
+            with st.expander("All answers as a table"):
+                st.dataframe(ans, hide_index=True, width="stretch")
     with tab4:
         for name, df in t.items():
             st.download_button(f"Download {name}.csv", df.to_csv(index=False).encode(), f"{name}.csv",
@@ -1199,6 +1445,8 @@ init_state()
 ss = st.session_state
 if ss.step == "start":
     page_start()
+elif ss.step == "survey":
+    page_survey()
 elif ss.step == "done":
     page_thanks()
 else:
