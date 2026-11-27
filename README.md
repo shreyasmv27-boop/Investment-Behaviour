@@ -111,6 +111,9 @@ streamlit run app.py
 | `answers` | investor who finished the questions | one row per question: question number, question, answer, correct (quiz only); the top/bottom question gives two rows (5a, 5b) |
 
 Tabs are created automatically the first time someone uses the app. Writing happens in the background, so taps never wait for Google.
+Saves from everyone are combined and written every 5 seconds (`WRITE_EVERY`) in a handful of requests, which keeps the app well inside Google's limit of about 60 writes a minute even with 100 people at once. Failed writes are retried for about 10 minutes. The Download tab of the dashboard shows how many saves are waiting and any recent error.
+
+**Resume:** after someone taps Continue, the page address gets `?r=<their ID>`. If they refresh, or their phone sleeps and the session drops, the app picks up where they left off (as long as the app hasn't restarted).
 Taps on the filter button itself and on the dialog's close (X) can't be recorded; every filter change, the fund manager links and all other buttons are.
 
 ## Dashboard

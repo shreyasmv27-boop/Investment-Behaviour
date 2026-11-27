@@ -527,9 +527,45 @@ def nav_chart(f):
                              on_change=lambda: log("chart_period", f["fund_name"], st.session_state.get(key)))
 
 
+# ---- resume after a refresh or a locked phone
+# Streamlit forgets a session about 2 minutes after the phone sleeps or the page is refreshed. Each person's
+# progress is kept here (in server memory) under the ID in their page address (?r=...), so they carry on where
+# they left off instead of starting again.
+KEEP = ["rid", "step", "alloc", "events", "events_saved", "view", "tab", "mode", "started_at", "name", "app", "age",
+        "location", "status", "order", "completed_at", "survey_started", "nav_count", "survey_missing"]
+KEEP_HOURS = 12
+
+
+@st.cache_resource
+def saved_sessions():
+    return {}
+
+
+def remember():
+    ss = st.session_state
+    if ss.get("step", "start") == "start":
+        return
+    snap = {k: ss[k] for k in KEEP if k in ss}
+    snap.update({k: ss[k] for k in list(ss.keys()) if str(k).startswith("ans_")})
+    store = saved_sessions()
+    store[ss.rid] = (time.time(), snap)
+    if len(store) > 50 and random.random() < 0.05:          # drop old entries now and then
+        cutoff = time.time() - KEEP_HOURS * 3600
+        for rid in [r for r, (t, _) in list(store.items()) if t < cutoff]:
+            store.pop(rid, None)
+
+
 def init_state():
     ss = st.session_state
     if "rid" not in ss:
+        r = st.query_params.get("r")
+        saved = saved_sessions().get(r) if r else None
+        if saved:
+            import copy
+            for k, v in copy.deepcopy(saved[1]).items():
+                ss[k] = v
+            log("resumed", value=f"after a refresh or the phone sleeping, on {ss.step}")
+            return
         ss.rid = "R-" + uuid.uuid4().hex[:8].upper()
         ss.step = "start"
         ss.alloc = {}
@@ -541,7 +577,7 @@ def init_state():
 
 
 ACTIONS = {  # event code -> readable action name in the database and dashboard
-    "start": "Tapped Continue (started)", "start_invalid": "Tapped Continue (name or app missing)",
+    "start": "Tapped Continue (started)", "resumed": "Came back (page refreshed or phone slept)", "start_invalid": "Tapped Continue (name or app missing)",
     "list_order": "Fund list order shown", "tab": "Tapped tab", "search": "Searched",
     "sort": "Changed sort", "filter_reset": "Tapped Reset filters", "open_fund": "Opened fund",
     "close_fund": "Tapped Back", "chart_period": "Changed chart period", "choose_mode": "Tapped Buy/SIP button",
@@ -640,6 +676,7 @@ def page_start():
                 e["name"] = ss.name
             log("start", value=app)
             ss.step = "invest"
+            st.query_params["r"] = ss.rid      # lets the app resume this person after a refresh
             flush()
             st.rerun()
 
@@ -1136,12 +1173,10 @@ def _sheet():
     return gspread.authorize(creds, http_client=gspread.http_client.BackOffHTTPClient).open_by_key(secret("sheet_id"))
 
 
-def _write(job, mem):
-    """Runs in the background writer. job = {"investor": {...}, "purchases": [...], "portfolio": [...], "clicks": [...]}"""
-    if job.get("delete"):
-        _delete(job["delete"], mem)
-        return
-    inv = job.get("investor")
+def _write(batch, mem):
+    """Runs in the background writer. batch = {"investors": {rid: row}, "purchases": [...], "portfolio": [...],
+    "clicks": [...], "answers": [...]}, already merged from many people's saves. Each table is removed from the
+    batch once it has been written, so a retry after an error never writes the same rows twice."""
     if use_sheets():
         import gspread
         if "sh" not in mem:
@@ -1168,41 +1203,53 @@ def _write(job, mem):
             return mem[key]
 
         for name in ("purchases", "portfolio", "clicks", "answers"):
-            if job.get(name):
-                ws(name).append_rows([[str(r.get(c, "")) for c in TABLES[name]] for r in job[name]],
+            if batch.get(name):
+                ws(name).append_rows([[str(r.get(c, "")) for c in TABLES[name]] for r in batch[name]],
                                      value_input_option="RAW")
-        if not inv:
+            batch.pop(name, None)
+        invs = batch.get("investors") or {}
+        if not invs:
             return
-        w, rows = ws("investors"), mem.setdefault("rows", {})
-        values = [[str(inv.get(c, "")) for c in TABLES["investors"]]]
-        row = rows.get(inv["rid"])
-        if row is None:
-            cell = w.find(inv["rid"], in_column=1)
-            row = cell.row if cell else None
-        if row is None:
-            res = w.append_rows(values, value_input_option="RAW")
-            row = int(res["updates"]["updatedRange"].split("!")[1].split(":")[0].lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-        else:
-            w.update(values=values, range_name=f"A{row}", value_input_option="RAW")
-        rows[inv["rid"]] = row
+        w = ws("investors")
+        if mem.get("rows") is None:                    # learn where each person's row is (one read)
+            col = w.col_values(1)
+            mem["rows"] = {rid: i + 1 for i, rid in enumerate(col) if i and rid}
+        rows = mem["rows"]
+        vals = {rid: [str(r.get(c, "")) for c in TABLES["investors"]] for rid, r in invs.items()}
+        old = [rid for rid in vals if rid in rows]
+        new = [rid for rid in vals if rid not in rows]
+        if old:                                        # everyone already in the sheet: one request
+            w.batch_update([{"range": f"A{rows[rid]}", "values": [vals[rid]]} for rid in old],
+                           value_input_option="RAW")
+            for rid in old:
+                invs.pop(rid)
+        if new:                                        # everyone new: one request
+            res = w.append_rows([vals[rid] for rid in new], value_input_option="RAW")
+            start = int(res["updates"]["updatedRange"].split("!")[1].split(":")[0].lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+            for i, rid in enumerate(new):
+                rows[rid] = start + i
+                invs.pop(rid)
     else:
         LOCAL_DIR.mkdir(exist_ok=True)
         for name in ("purchases", "portfolio", "clicks", "answers"):
-            if job.get(name):
+            if batch.get(name):
                 p = LOCAL_DIR / f"{name}.csv"
-                new = pd.DataFrame(job[name], columns=TABLES[name])
+                new = pd.DataFrame(batch[name], columns=TABLES[name])
                 if p.exists() and list(pd.read_csv(p, nrows=0).columns) != TABLES[name]:
                     new = pd.concat([pd.read_csv(p, dtype=str), new]).reindex(columns=TABLES[name])
                     new.to_csv(p, index=False)
                 else:
                     new.to_csv(p, mode="a", header=not p.exists(), index=False)
-        if not inv:
+            batch.pop(name, None)
+        invs = batch.get("investors") or {}
+        if not invs:
             return
         p = LOCAL_DIR / "investors.csv"
         df = pd.read_csv(p, dtype=str) if p.exists() else pd.DataFrame(columns=TABLES["investors"])
-        df = df[df["rid"] != inv["rid"]]
-        df = pd.concat([df, pd.DataFrame([inv], columns=TABLES["investors"])])
+        df = df[~df["rid"].isin(list(invs))]
+        df = pd.concat([df, pd.DataFrame(list(invs.values()), columns=TABLES["investors"])])
         df.to_csv(p, index=False)
+        invs.clear()
 
 
 def _delete(rids, mem):
@@ -1223,7 +1270,7 @@ def _delete(rids, mem):
                 continue
             w.clear()
             w.update(values=[rows[0]] + keep, range_name="A1", value_input_option="RAW")
-        mem["rows"] = {}            # row numbers have shifted
+        mem["rows"] = None          # row numbers have shifted; re-read them on the next write
     else:
         for name in TABLES:
             p = LOCAL_DIR / f"{name}.csv"
@@ -1232,25 +1279,74 @@ def _delete(rids, mem):
                 df[~df["rid"].isin(rids)].to_csv(p, index=False)
 
 
+WRITE_EVERY = 5      # seconds between batches. Google allows ~60 writes a minute; a batch is at most 6 writes.
+
+
+def _merge(jobs):
+    batch = {"investors": {}, "purchases": [], "portfolio": [], "clicks": [], "answers": []}
+    for j in jobs:
+        if j.get("investor"):
+            batch["investors"][j["investor"]["rid"]] = j["investor"]      # only the latest row per person
+        for name in ("purchases", "portfolio", "clicks", "answers"):
+            batch[name] += j.get(name) or []
+    return batch
+
+
 @st.cache_resource
 def writer():
-    """One background thread for the whole app: writes jobs in order and retries, so taps never wait on Google."""
-    q, mem = queue.Queue(), {}
+    """One background thread for the whole app. Every few seconds it takes everything people have saved since
+    the last round and writes it in a handful of requests, however many people are using the app."""
+    q, mem = queue.Queue(), {"rows": None, "written": 0}
+
+    def write(jobs):
+        batch = _merge(jobs)
+        for attempt in range(10):
+            try:
+                _write(batch, mem)
+                mem["written"] += len(jobs)
+                return
+            except Exception as e:
+                mem.pop("sh", None)
+                for k in [k for k in mem if k.startswith("ws_")]:
+                    mem.pop(k)
+                mem["last_error"] = f"{datetime.now(IST):%d %b %H:%M:%S} {type(e).__name__}: {str(e)[:200]}"
+                time.sleep(min(60, 3 * 2 ** attempt))
+        # Gave up after ~10 minutes: keep the rows in a local file rather than lose them silently.
+        try:
+            LOCAL_DIR.mkdir(exist_ok=True)
+            with open(LOCAL_DIR / "unsaved.jsonl", "a") as fh:
+                fh.write(json.dumps(batch, default=str) + "\n")
+            mem["unsaved"] = mem.get("unsaved", 0) + len(jobs)
+        except Exception:
+            pass
 
     def work():
         while True:
-            job = q.get()
-            for attempt in range(6):
+            jobs = [q.get()]
+            time.sleep(WRITE_EVERY)                   # let other people's saves pile up into the same batch
+            while True:
                 try:
-                    _write(job, mem)
+                    jobs.append(q.get_nowait())
+                except queue.Empty:
                     break
-                except Exception as e:
-                    mem.pop("sh", None)
-                    for k in [k for k in mem if k.startswith("ws_")]:
-                        mem.pop(k)
-                    mem["last_error"] = f"{datetime.now():%H:%M:%S} {e}"
-                    time.sleep(2 ** attempt)
-            q.task_done()
+            try:
+                pending = []
+                for j in jobs:                        # deletes run in order, between the saves around them
+                    if j.get("delete"):
+                        if pending:
+                            write(pending)
+                            pending = []
+                        try:
+                            _delete(j["delete"], mem)
+                        except Exception as e:
+                            mem["last_error"] = f"{datetime.now(IST):%d %b %H:%M:%S} delete failed: {e}"
+                    else:
+                        pending.append(j)
+                if pending:
+                    write(pending)
+            finally:
+                for _ in jobs:
+                    q.task_done()
 
     threading.Thread(target=work, daemon=True).start()
     return q, mem
@@ -1489,9 +1585,12 @@ def page_admin(funds):
         for name, df in t.items():
             st.download_button(f"Download {name}.csv", df.to_csv(index=False).encode(), f"{name}.csv",
                                "text/csv", width="stretch")
-        err = writer()[1].get("last_error")
-        if err:
-            st.caption(f"Last write error (retried automatically): {err}")
+        q, mem = writer()
+        st.caption(f"Saves waiting to be written: {q.qsize()} · written since the app started: {mem['written']}")
+        if mem.get("last_error"):
+            st.caption(f"Last write error (retried automatically): {mem['last_error']}")
+        if mem.get("unsaved"):
+            st.error(f"{mem['unsaved']} saves could not be written to Google Sheets after 10 tries.")
 
 
 # ---------------------------------------------------------------- main
@@ -1505,6 +1604,7 @@ if "admin" in qp:
 
 init_state()
 ss = st.session_state
+remember()
 if ss.step == "start":
     page_start()
 elif ss.step == "survey":
@@ -1542,3 +1642,5 @@ else:
                 page_portfolio(funds)
             else:
                 page_explore(funds)
+
+remember()        # save again after this run, so the latest taps survive a refresh
