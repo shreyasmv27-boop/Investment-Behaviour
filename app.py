@@ -36,6 +36,7 @@ HOLDINGS_FILE = Path(__file__).parent / "holdings.xlsx"
 # To add a question, add a dict here. "id" becomes the column name in the Google Sheet (keep ids unique and
 # add new questions at the end, so existing columns don't shift).
 #   type "single": pick one option        type "multi": pick one or more ("only" = can't be combined, "max" = most picks)
+#   "other": an option that opens a box to type the answer; saved as "Others: <what they typed>"
 #   type "top_bottom": pick exactly `top` best and `bottom` worst from the same list
 #   "correct": for quiz questions, the right option (saved as a separate *_correct column)
 QUESTIONS = [
@@ -47,7 +48,7 @@ QUESTIONS = [
                  "100% investment in that year, no cash left", "I'm not sure"],
      "correct": "The fund replaced roughly all its holdings over the year"},
     {"id": "heard_from", "type": "single", "text": "Where did you last hear about a fund you bought?",
-     "options": ["Instagram", "YouTube", "Friend or advisor", "Newspaper"]},
+     "options": ["Instagram", "YouTube", "Friend or advisor", "Newspaper", "Others"], "other": "Others"},
     {"id": "portfolio_similar", "type": "single", "text": "Is the portfolio you built here similar to your real one?",
      "options": ["Yes", "Partly", "No"]},
     {"id": "philosophy", "type": "top_bottom", "top": 3, "bottom": 2,
@@ -715,6 +716,9 @@ except where you're asked to pick the correct meaning.</p></div>""", unsafe_allo
             k = f"ans_{q['id']}"
             if q["type"] == "single":
                 st.radio(q["text"], q["options"], index=None, key=k, label_visibility="collapsed")
+                if q.get("other") and ss.get(k) == q["other"]:
+                    st.text_input("Please specify", key=k + "_other", placeholder="Type your answer",
+                                  label_visibility="collapsed")
             elif q["type"] == "multi":
                 if q.get("max"):
                     st.markdown(f'<div class="qsub">{len(ss.get(k) or [])}/{q["max"]} picked</div>',
@@ -770,6 +774,9 @@ def check_answers():
         k = f"ans_{q['id']}"
         if q["type"] == "single":
             v = ss.get(k)
+            if q.get("other") and v == q["other"]:
+                typed = (ss.get(k + "_other") or "").strip()
+                v = f"{q['other']}: {typed}" if typed else None      # "Others" needs the typed answer
             if not v:
                 problems.append(q["id"])
             rows.append({**base, "question_no": i, "question": q["text"], "answer": v or "",
@@ -1564,19 +1571,28 @@ def page_admin(funds):
                     if len(v):
                         st.markdown(f"**{title}** (from the start page)")
                         st.bar_chart(v, horizontal=True, height=40 + 36 * len(v))
-            opts = {}
+            opts, others = {}, {}
             for q in QUESTIONS:
                 opts[q["text"]] = q["options"]
+                if q.get("other"):
+                    others[q["text"]] = q["other"]
                 if q["type"] == "top_bottom":
                     opts[f"{q['text']} ({q['top']} that matter most)"] = q["options"]
                     opts[f"{q['text']} ({q['bottom']} that matter least)"] = q["options"]
             for (no, qt), g in ans.groupby(["question_no", "question"], sort=False):
                 st.markdown(f"**{no}. {qt}**")
                 v = g["answer"].fillna("").str.split(" \\| ").explode()
+                typed = []
+                if qt in others:                      # "Others: xyz" counts under Others; typed answers listed below
+                    pre = others[qt] + ":"
+                    typed = [a[len(pre):].strip() for a in v if a.startswith(pre)]
+                    v = v.where(~v.str.startswith(pre), others[qt])
                 v = v[v != ""].value_counts()
                 if qt in opts:
                     v = v.reindex(opts[qt], fill_value=0)
                 st.bar_chart(v, horizontal=True, height=40 + 36 * max(len(v), 1))
+                if typed:
+                    st.caption("Typed under " + others[qt] + ": " + ", ".join(typed))
                 if g["correct"].isin(["yes", "no"]).any():
                     st.caption(f"Answered correctly: {(g['correct'] == 'yes').mean():.0%}")
             with st.expander("All answers as a table"):
